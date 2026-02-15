@@ -12,6 +12,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from transformers import DistilBertTokenizer
+
 from config import Config
 
 
@@ -73,7 +74,7 @@ class RPCMultimodalDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | Image.Image]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         rel_path, label = self.samples[idx]
         img_path = self.data_root / rel_path
 

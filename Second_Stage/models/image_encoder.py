@@ -1,12 +1,12 @@
 """
 Image Encoder: Pretrained backbone → embedding vector.
-Using pretrained EfficientNet + training a new projection head
+
 Supports EfficientNet-B4, ConvNeXt-Small, and ViT-Small via timm.
 """
 
 import torch
 import torch.nn as nn
-import timm # model package, pytorch image models
+import timm
 
 
 class ImageEncoder(nn.Module):
@@ -25,7 +25,6 @@ class ImageEncoder(nn.Module):
         dropout: float = 0.3,
     ):
         super().__init__()
-        self.embed_dim = embed_dim
 
         # Load pretrained backbone from timm (removes classification head)
         self.backbone = timm.create_model(
@@ -33,13 +32,14 @@ class ImageEncoder(nn.Module):
             pretrained=pretrained,
             num_classes=0,  # Remove classifier, outputs pooled features
         )
+        self.embed_dim = embed_dim
 
-        # Get backbone output dimension (freature vector)
+        # Get backbone output dimension
         with torch.no_grad():
             dummy = torch.randn(1, 3, 224, 224)
             backbone_dim = self.backbone(dummy).shape[1]
 
-        # Projection head: backbone features vector → embed_dim
+        # Projection head: backbone features → embed_dim
         self.projection = nn.Sequential(
             nn.Linear(backbone_dim, embed_dim),
             nn.ReLU(inplace=True),
@@ -57,7 +57,7 @@ class ImageEncoder(nn.Module):
             x_img: Image embedding [B, embed_dim]
         """
         features = self.backbone(x)       # [B, backbone_dim]
-        x_img = self.projection(features)  # [B, embed_dim]    x_image represents the final embedding
+        x_img = self.projection(features)  # [B, embed_dim]
         return x_img
 
     def freeze_backbone(self, freeze: bool = True) -> None:
@@ -85,4 +85,3 @@ class ImageClassifier(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         features = self.encoder(x)
         return self.head(features)
-    
