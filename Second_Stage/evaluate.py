@@ -158,7 +158,7 @@ def main():
 
     val_dataset = RPCMultimodalDataset(
         data_root=config.data_root,
-        split="val",
+        split="val2019",
         ocr_cache=ocr_cache,
         config=config,
         transform=get_val_transforms(config),

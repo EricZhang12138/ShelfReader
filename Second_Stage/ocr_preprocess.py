@@ -1,7 +1,7 @@
 """
 Batch OCR Preprocessing for RPC Dataset.
 
-Extracts text from all product images using PaddleOCR and caches results
+Extracts text from all product images using EasyOCR and caches results
 to a JSON file so OCR doesn't need to run during training.
 
 Usage:
@@ -10,42 +10,29 @@ Usage:
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Dict, List
 
-from paddleocr import PaddleOCR
+import easyocr
 from tqdm import tqdm
 
-# The code extracts all unique text with confidence > 0.5
-# This function returns a space seperated string of texts from one single image 
-def extract_text_from_image(ocr_engine: PaddleOCR, image_path: str) -> str:
-    """
-    Run OCR on a single image and return cleaned concatenated text.
-    """
+
+def extract_text_from_image(reader, image_path: str) -> str:
     try:
-        results = ocr_engine.ocr(image_path, cls=True)
-        if results is None or len(results) == 0:
+        results = reader.readtext(image_path)
+        if not results:
             return ""
 
         texts = []
-        for line in results:
-            if line is None:
-                continue
-            for detection in line:
-                # detection = [bbox, (text, confidence)]
-                if detection and len(detection) >= 2:
-                    text = detection[1][0]
-                    confidence = detection[1][1]
-                    if confidence > 0.5:  # Filter low-confidence detections
-                        texts.append(text.strip())
+        for (bbox, text, confidence) in results:
+            if confidence > 0.5 and len(text.strip()) > 1:
+                texts.append(text.strip())
 
-        # Join all detected text, deduplicate while preserving order
         seen = set()
         unique_texts = []
         for t in texts:
             t_lower = t.lower()
-            if t_lower not in seen and len(t) > 1:  # Skip single chars
+            if t_lower not in seen:
                 seen.add(t_lower)
                 unique_texts.append(t)
 
@@ -57,43 +44,27 @@ def extract_text_from_image(ocr_engine: PaddleOCR, image_path: str) -> str:
 
 
 def process_dataset(data_root_str: str, output_path: str) -> None:
-    """
-    Walk through the RPC dataset directory and extract OCR text for every image.
-    Saves results as {relative_image_path: extracted_text}.
-    """
-    # Initialize PaddleOCR (downloads model on first run)
-    ocr = PaddleOCR(
-        use_angle_cls=True,
-        lang="en",
-        show_log=False,
-        use_gpu=True,
-    )
+    reader = easyocr.Reader(['ch_sim', 'en'], gpu=True)
 
     data_root = Path(data_root_str)
     image_extensions = {".jpg", ".jpeg", ".png", ".bmp"}
 
-    # Collect all image paths
     image_paths: List[Path] = []
     for ext in image_extensions:
         image_paths.extend(data_root.rglob(f"*{ext}"))
 
     print(f"Found {len(image_paths)} images in {data_root}")
 
-    # Extract OCR text
-    # ocr_cache is a json file that stores all the 
     ocr_cache: Dict[str, str] = {}
     empty_count = 0
 
-    # tqdm is for progress bar 
     for img_path in tqdm(image_paths, desc="Extracting OCR"):
-        # convert absolute path to relative path
         rel_path = str(img_path.relative_to(data_root))
-        text = extract_text_from_image(ocr, str(img_path))
+        text = extract_text_from_image(reader, str(img_path))
         ocr_cache[rel_path] = text
         if not text:
             empty_count += 1
 
-    # Save ocr_cache as a json file 
     with open(output_path, "w") as f:
         json.dump(ocr_cache, f, indent=2)
 

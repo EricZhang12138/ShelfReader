@@ -20,16 +20,16 @@ class RPCMultimodalDataset(Dataset):
     """
     RPC Dataset that returns (image_tensor, tokenized_text, label) tuples.
 
-    Expects directory structure:
+    Expects COCO-format annotations:
         data_root/
-            train/
-                class_000/
-                    img_001.jpg
-                    ...
-                class_001/
-                    ...
-            val/
+            train2019/
+                image1.jpg
+                image2.jpg
                 ...
+            val2019/
+                ...
+            instances_train2019.json
+            instances_val2019.json
 
     OCR text is loaded from a precomputed JSON cache.
     """
@@ -51,22 +51,48 @@ class RPCMultimodalDataset(Dataset):
         # Initialize tokenizer for text branch
         self.tokenizer = DistilBertTokenizer.from_pretrained(config.text_model_name)
 
-        # Build image list and labels
+        # Build image list and labels from COCO-format annotation file
         self.samples: List[Tuple[str, int]] = []
-        self.class_to_idx: Dict[str, int] = {}
+        self.class_to_idx: Dict[int, int] = {}  # category_id -> contiguous index
 
         split_dir = self.data_root / split
         if not split_dir.exists():
             raise FileNotFoundError(f"Split directory not found: {split_dir}")
 
-        # Sort for deterministic class ordering
-        class_dirs = sorted([d for d in split_dir.iterdir() if d.is_dir()])
-        for idx, class_dir in enumerate(class_dirs):
-            self.class_to_idx[class_dir.name] = idx
-            for img_file in sorted(class_dir.iterdir()):
-                if img_file.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
-                    rel_path = str(img_file.relative_to(self.data_root))
-                    self.samples.append((rel_path, idx))
+        # Load COCO annotation file
+        ann_file = self.data_root / f"instances_{split}.json"
+        if not ann_file.exists():
+            raise FileNotFoundError(f"Annotation file not found: {ann_file}")
+
+        with open(ann_file, "r") as f:
+            coco = json.load(f)
+
+        # Build category_id -> contiguous index mapping
+        categories = sorted(coco["categories"], key=lambda c: c["id"])
+        for idx, cat in enumerate(categories):
+            self.class_to_idx[cat["id"]] = idx
+
+        # Build image_id -> filename mapping
+        id_to_filename = {img["id"]: img["file_name"] for img in coco["images"]}
+
+        # Build image_id -> category_id mapping from annotations
+        # RPC has one category per image, so we take the first annotation per image
+        id_to_category = {}
+        for ann in coco["annotations"]:
+            image_id = ann["image_id"]
+            if image_id not in id_to_category:
+                id_to_category[image_id] = ann["category_id"]
+
+        # Build samples list
+        for image_id, category_id in id_to_category.items():
+            filename = id_to_filename.get(image_id)
+            if filename is None:
+                continue
+            rel_path = os.path.join(split, filename)
+            label = self.class_to_idx[category_id]
+            # Verify image exists
+            if (self.data_root / rel_path).exists():
+                self.samples.append((rel_path, label))
 
         self.num_classes = len(self.class_to_idx)
         print(f"[{split}] Loaded {len(self.samples)} samples, {self.num_classes} classes")
@@ -173,7 +199,7 @@ def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader]:
 
     train_dataset = RPCMultimodalDataset(
         data_root=config.data_root,
-        split="train",
+        split="train2019",
         ocr_cache=ocr_cache,
         config=config,
         transform=get_train_transforms(config),
@@ -181,11 +207,14 @@ def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader]:
 
     val_dataset = RPCMultimodalDataset(
         data_root=config.data_root,
-        split="val",
+        split="val2019",
         ocr_cache=ocr_cache,
         config=config,
         transform=get_val_transforms(config),
     )
+
+    # Update config with actual number of classes
+    config.num_classes = train_dataset.num_classes
 
     train_loader = DataLoader(
         train_dataset,
