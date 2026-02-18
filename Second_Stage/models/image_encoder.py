@@ -6,9 +6,30 @@ Supports EfficientNet-B4, ConvNeXt-Small, and ViT-Small via timm.
 
 import torch
 import torch.nn as nn
-import timm
+import timm # pytorch image models
 
+"""
+Summary of nn.Module:
+A neural network layer is just weight tensors (matrices of numbers)
+nn.Module tracks all those weights automatically when you assign layers with self.xxx = ...
+This tracking lets you do things in one line that would otherwise be tedious:
+model.parameters() → gives all weights to the optimizer
+model.to("cuda") → moves all weights to GPU
+model.state_dict() → saves all weights to a file
+You only write forward() to define how data flows through the layers
+PyTorch's autograd handles the backward pass automatically
+Everything (weights + input data) must be on the same device (CPU or GPU) for computation to work
+"""
+"""
+When you assign any nn.Module (like nn.Sequential, nn.Linear, or a custom module) to self.something in your __init__, PyTorch automatically handles:
+✅ Parameter tracking
+✅ Gradient computation
+✅ Optimizer updates
+✅ GPU movement
+✅ Save/load
+"""
 
+# Pytorch uses nn.Module as the standard way to build neural network components
 class ImageEncoder(nn.Module):
     """
     Extracts a fixed-size embedding from a product image.
@@ -35,7 +56,7 @@ class ImageEncoder(nn.Module):
         self.embed_dim = embed_dim
 
         # Get backbone output dimension
-        with torch.no_grad():
+        with torch.no_grad(): #torch.no_grad() tells PyTorch not to track gradients for operations inside this block.
             dummy = torch.randn(1, 3, 224, 224)
             backbone_dim = self.backbone(dummy).shape[1]
 

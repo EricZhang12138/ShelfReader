@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
@@ -46,8 +46,23 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed) # pytorch will then generate the same random number on all CPU 
     torch.cuda.manual_seed_all(seed) # pytorch will then generate the same random number on all GPU 
     torch.backends.cudnn.deterministic = True
+"""
+# Attempt 1: Only CPU seed
+torch.manual_seed(42)
+model = nn.Linear(10, 5).cuda()  # Weights initialized on GPU
+# Uses GPU RNG - NOT seeded! ❌
+
+# Attempt 2: Both seeds
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+model = nn.Linear(10, 5).cuda()  # Weights initialized on GPU
+# Uses GPU RNG - properly seeded! ✅
+"""
 
 
+
+
+# in one batch, you mix up the images in one batch
 def mixup_data(x, y, alpha=0.2):
     """Apply mixup augmentation."""
     if alpha > 0:
@@ -85,6 +100,13 @@ class EarlyStopping:
             self.best_score = val_acc
             self.counter = 0
         return self.should_stop
+    
+    """
+    __call__ is a Python dunder (double underscore) method that lets you use an object like a function.
+    When you define __call__ on a class, you can do this:
+    early_stopping = EarlyStopping(patience=10)
+    early_stopping(val_acc)  # This calls __call__
+    """
 
 
 # ── Stage 1: Pretrain Encoders Separately ────────────────────────────────
@@ -107,11 +129,19 @@ def train_image_encoder_stage1(
 
     model = ImageClassifier(encoder, config.num_classes).to(config.device)
 
+
+    # AdamW, compared to SGD has two edges: 
+    # 1. it has adaptive learning rate, meaning the learning rate adapts as training goes
+    # If a parameter has consistently large gradients → reduce its effective learning rate / If a parameter has consistently small gradients → increase its effective learning rate
+    # This prevents parameters from overshooting or moving too slowly
+    # 2. it adds regularisation 
+    # And in this case, the weight_decay is essentially just L2 regularisation 
     optimizer = AdamW(
         model.parameters(), lr=config.stage1_lr, weight_decay=config.weight_decay
-    )
-    criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-    scaler = GradScaler(enabled=config.fp16)
+    ) # the optimiser we use 
+
+    criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)# softening target labels during training
+    scaler = GradScaler("cuda", enabled=config.fp16)
 
     best_acc = 0.0
     for epoch in range(config.stage1_epochs):
@@ -124,7 +154,12 @@ def train_image_encoder_stage1(
             labels = batch["label"].to(config.device)
 
             optimizer.zero_grad()
-            with autocast(enabled=config.fp16):
+            with autocast("cuda", enabled=config.fp16):
+                """
+                logits = model(images) — runs the forward pass through the entire model. 
+                The output logits is a tensor of shape [batch_size, num_classes]
+                — raw scores for each class (e.g., 200 numbers per image, one per grocery product).
+                """
                 logits = model(images)
                 loss = criterion(logits, labels)
 
