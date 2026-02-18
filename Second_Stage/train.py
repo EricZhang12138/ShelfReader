@@ -43,8 +43,8 @@ from models import (
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    torch.manual_seed(seed) # pytorch will then generate the same random number on all CPU 
+    torch.cuda.manual_seed_all(seed) # pytorch will then generate the same random number on all GPU 
     torch.backends.cudnn.deterministic = True
 
 
