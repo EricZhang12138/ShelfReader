@@ -139,6 +139,7 @@ def train_image_encoder_stage1(
     optimizer = AdamW(
         model.parameters(), lr=config.stage1_lr, weight_decay=config.weight_decay
     ) # the optimiser we use 
+    #model.parameters() is just a generator that yields all the weight tensors in the model one by one
 
     criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)# softening target labels during training
     scaler = GradScaler("cuda", enabled=config.fp16)
@@ -147,12 +148,18 @@ def train_image_encoder_stage1(
     for epoch in range(config.stage1_epochs):
         # Train
         model.train()
+        """
+        Good question. model.train() doesn't actually start training — it's just a mode switch that affects how certain layers behave.
+        Two layers behave differently depending on the mode:
+        Dropout — during training, randomly zeros out some neurons to prevent overfitting. During eval, you want deterministic predictions so it turns off and lets everything through.
+        BatchNorm — during training, normalises using the current batch's mean and variance. During eval, it uses running averages accumulated during training instead.
+        """
         total_loss, correct, total = 0.0, 0, 0
 
         for batch in train_loader:
             images = batch["image"].to(config.device)
             labels = batch["label"].to(config.device)
-
+            # PyTorch accumulates gradients by default, so you must wipe them clean at the start of each batch
             optimizer.zero_grad()
             with autocast("cuda", enabled=config.fp16):
                 """
@@ -164,6 +171,12 @@ def train_image_encoder_stage1(
                 loss = criterion(logits, labels)
 
             scaler.scale(loss).backward()
+            # after .backward(), every weight in the model now has a .grad attribute filled in.
+            """
+            Yes, exactly. Each weight is a Tensor object, and it has (among other things) two relevant fields:
+            weight.data   — the actual value (e.g. 0.342)
+            weight.grad   — the gradient, filled in after .backward()
+            """
             scaler.step(optimizer)
             scaler.update()
 
