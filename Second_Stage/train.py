@@ -8,6 +8,8 @@ Supports:
   - Cosine annealing with warmup
   - Mixup augmentation
   - Early stopping
+
+usage: python3 train.py --data_root /path/to/data_root --ocr_cache ocr_cache.json
 """
 
 import argparse
@@ -236,7 +238,7 @@ def train_text_encoder_stage1(
             labels = batch["label"].to(config.device)
 
             optimizer.zero_grad()
-            with autocast(enabled=config.fp16):
+            with autocast("cuda",enabled=config.fp16):
                 logits = model(input_ids, attention_mask)
                 loss = criterion(logits, labels)
 
@@ -351,7 +353,7 @@ def train_multimodal(
 
             optimizer.zero_grad()
 
-            with autocast(enabled=config.fp16):
+            with autocast("cuda",enabled=config.fp16):
                 # Optional: Mixup on images only
                 if config.use_mixup and random.random() < 0.5:
                     images, labels_a, labels_b, lam = mixup_data(
@@ -439,7 +441,7 @@ def evaluate_multimodal(model, val_loader, criterion, config):
         attention_mask = batch["attention_mask"].to(config.device)
         labels = batch["label"].to(config.device)
 
-        with autocast(enabled=config.fp16):
+        with autocast("cuda",enabled=config.fp16):
             logits = model(images, input_ids, attention_mask)
             loss = criterion(logits, labels)
 

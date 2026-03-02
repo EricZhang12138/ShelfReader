@@ -10,7 +10,7 @@ from typing import Optional
 @dataclass
 class Config:
     # ── Paths ────────────────────────────────────────────────────────────
-    data_root: str = "/path/to/rpc_dataset"
+    data_root: str = "/mnt/external/home/YuouZhang/Documents_external/RPC_dataset/archive"
     ocr_cache_path: str = "ocr_cache.json"
     checkpoint_dir: str = "checkpoints"
     log_dir: str = "logs"
@@ -27,7 +27,7 @@ class Config:
     image_dropout: float = 0.3
 
     # ── Text Encoder ─────────────────────────────────────────────────────
-    text_model_name: str = "distilbert-base-uncased"
+    text_model_name: str = "distilbert-base-multilingual-cased"
     text_embed_dim: int = 512
     text_dropout: float = 0.2
     freeze_text_layers: int = 4      # Freeze first N transformer layers

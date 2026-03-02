@@ -1,7 +1,7 @@
 """
 Batch OCR Preprocessing for RPC Dataset.
 
-Extracts text from all product images using EasyOCR and caches results
+Extracts text from all product images using PaddleOCR and caches results
 to a JSON file so OCR doesn't need to run during training.
 
 Usage:
@@ -13,18 +13,25 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-import easyocr
+from paddleocr import PaddleOCR
 from tqdm import tqdm
 
 
-def extract_text_from_image(reader, image_path: str) -> str:
+def extract_text_from_image(ocr, image_path: str) -> str:
     try:
-        results = reader.readtext(image_path)
-        if not results:
+        # cls=True enables the angle classifier to detect rotated text
+        results = ocr.ocr(image_path, cls=True)
+        
+        # PaddleOCR returns None or [None] if no text is found
+        if not results or not results[0]:
             return ""
 
         texts = []
-        for (bbox, text, confidence) in results:
+        # results[0] contains the list of detected text boxes for the image
+        for line in results[0]:
+            # Unpack PaddleOCR's specific nested format
+            bbox, (text, confidence) = line
+            
             if confidence > 0.5 and len(text.strip()) > 1:
                 texts.append(text.strip())
 
@@ -44,7 +51,9 @@ def extract_text_from_image(reader, image_path: str) -> str:
 
 
 def process_dataset(data_root_str: str, output_path: str) -> None:
-    reader = easyocr.Reader(['ch_sim', 'en'], gpu=True)
+    # Initialize PaddleOCR
+    # lang='ch' supports both Chinese and English
+    ocr = PaddleOCR(use_angle_cls=True, lang='ch', use_gpu=True, show_log=False)
 
     data_root = Path(data_root_str)
     image_extensions = {".jpg", ".jpeg", ".png", ".bmp"}
@@ -52,6 +61,8 @@ def process_dataset(data_root_str: str, output_path: str) -> None:
     image_paths: List[Path] = []
     for ext in image_extensions:
         image_paths.extend(data_root.rglob(f"*{ext}"))
+        # Also grab uppercase extensions (e.g., .JPG, .PNG) just to be safe
+        image_paths.extend(data_root.rglob(f"*{ext.upper()}"))
 
     print(f"Found {len(image_paths)} images in {data_root}")
 
@@ -60,13 +71,14 @@ def process_dataset(data_root_str: str, output_path: str) -> None:
 
     for img_path in tqdm(image_paths, desc="Extracting OCR"):
         rel_path = str(img_path.relative_to(data_root))
-        text = extract_text_from_image(reader, str(img_path))
+        text = extract_text_from_image(ocr, str(img_path))
         ocr_cache[rel_path] = text
         if not text:
             empty_count += 1
 
-    with open(output_path, "w") as f:
-        json.dump(ocr_cache, f, indent=2)
+    # Save with utf-8 encoding and ensure_ascii=False to keep Chinese characters readable
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(ocr_cache, f, indent=2, ensure_ascii=False)
 
     print(f"\nOCR extraction complete:")
     print(f"  Total images: {len(ocr_cache)}")
