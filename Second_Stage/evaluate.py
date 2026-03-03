@@ -9,19 +9,18 @@ Outputs:
 """
 
 import argparse
-import json
 import os
 from collections import defaultdict
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from sklearn.metrics import classification_report, confusion_matrix
 from tqdm import tqdm
 
 from config import Config
-from dataset import RPCMultimodalDataset, get_val_transforms
+from dataset import create_dataloaders
 from models import build_model
 
 
@@ -40,7 +39,7 @@ def evaluate(model, dataloader, config):
         attention_mask = batch["attention_mask"].to(config.device)
         labels = batch["label"]
 
-        with autocast(enabled=config.fp16):
+        with autocast("cuda", enabled=config.fp16):
             logits = model(images, input_ids, attention_mask)
             probs = F.softmax(logits, dim=-1)
 
@@ -152,23 +151,13 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
 
-    # Create val dataloader
-    with open(config.ocr_cache_path, "r") as f:
-        ocr_cache = json.load(f)
+    # Recreate the same 70/15/15 split used during training.
+    # Using the same config.seed guarantees the test set is identical to
+    # what was held out during training — no data leakage.
+    _, _, test_loader = create_dataloaders(config)
 
-    val_dataset = RPCMultimodalDataset(
-        data_root=config.data_root,
-        split="val2019",
-        ocr_cache=ocr_cache,
-        config=config,
-        transform=get_val_transforms(config),
-    )
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4
-    )
-
-    # Run evaluation
-    preds, labels, probs = evaluate(model, val_loader, config)
+    # Run evaluation on the held-out test set
+    preds, labels, probs = evaluate(model, test_loader, config)
     metrics = compute_metrics(preds, labels, probs, config.num_classes)
 
     print(f"\n{'='*50}")
@@ -188,7 +177,7 @@ def main():
         print(f"\n{'='*50}")
         print(f"MODALITY CONTRIBUTION ANALYSIS")
         print(f"{'='*50}")
-        mod_results = analyze_modality_contributions(model, val_loader, config)
+        mod_results = analyze_modality_contributions(model, test_loader, config)
         print(f"  Full multimodal:  {mod_results['full_acc']:.2f}%")
         print(f"  Image only:       {mod_results['image_only_acc']:.2f}%")
         print(f"  Text only:        {mod_results['text_only_acc']:.2f}%")

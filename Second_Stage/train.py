@@ -144,6 +144,9 @@ def train_image_encoder_stage1(
     criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)# softening target labels during training
     scaler = GradScaler("cuda", enabled=config.fp16)
 
+    os.makedirs(config.checkpoint_dir, exist_ok=True)
+    save_path = os.path.join(config.checkpoint_dir, "image_encoder_stage1.pth")
+
     best_acc = 0.0
     for epoch in range(config.stage1_epochs):
         # Train
@@ -193,9 +196,14 @@ def train_image_encoder_stage1(
             f"Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}%"
         )
 
+        # Save best encoder weights to disk so they survive a Stage 2 crash
         if val_acc > best_acc:
             best_acc = val_acc
+            torch.save(encoder.state_dict(), save_path)
+            print(f"  ✓ Saved best image encoder (Val Acc: {val_acc:.2f}%) -> {save_path}")
 
+    # Reload best epoch weights — training ends at the last epoch, not the best one
+    encoder.load_state_dict(torch.load(save_path, map_location=config.device))
     print(f"  [Image S1] Best Val Acc: {best_acc:.2f}%")
     return encoder
 
@@ -223,7 +231,10 @@ def train_text_encoder_stage1(
         weight_decay=config.weight_decay,
     )
     criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-    scaler = GradScaler(enabled=config.fp16)
+    scaler = GradScaler("cuda", enabled=config.fp16)
+
+    os.makedirs(config.checkpoint_dir, exist_ok=True)
+    save_path = os.path.join(config.checkpoint_dir, "text_encoder_stage1.pth")
 
     best_acc = 0.0
     for epoch in range(config.stage1_epochs):
@@ -236,7 +247,7 @@ def train_text_encoder_stage1(
             labels = batch["label"].to(config.device)
 
             optimizer.zero_grad()
-            with autocast(enabled=config.fp16):
+            with autocast("cuda", enabled=config.fp16):
                 logits = model(input_ids, attention_mask)
                 loss = criterion(logits, labels)
 
@@ -255,9 +266,14 @@ def train_text_encoder_stage1(
             f"Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}%"
         )
 
+        # Save best encoder weights to disk so they survive a Stage 2 crash
         if val_acc > best_acc:
             best_acc = val_acc
+            torch.save(encoder.state_dict(), save_path)
+            print(f"  ✓ Saved best text encoder (Val Acc: {val_acc:.2f}%) -> {save_path}")
 
+    # Reload best epoch weights — training ends at the last epoch, not the best one
+    encoder.load_state_dict(torch.load(save_path, map_location=config.device))
     print(f"  [Text S1] Best Val Acc: {best_acc:.2f}%")
     return encoder
 
@@ -351,7 +367,7 @@ def train_multimodal(
 
             optimizer.zero_grad()
 
-            with autocast(enabled=config.fp16):
+            with autocast("cuda", enabled=config.fp16):
                 # Optional: Mixup on images only
                 if config.use_mixup and random.random() < 0.5:
                     images, labels_a, labels_b, lam = mixup_data(
@@ -473,6 +489,10 @@ def main():
     parser.add_argument("--backbone", type=str, default=None)
     parser.add_argument("--no_staged", action="store_true", help="Skip staged training")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--load_image_encoder", type=str, default=None,
+                        help="Path to saved Stage 1 image encoder weights — skips Stage 1a")
+    parser.add_argument("--load_text_encoder", type=str, default=None,
+                        help="Path to saved Stage 1 text encoder weights — skips Stage 1b")
     args = parser.parse_args()
 
     config = Config()
@@ -506,13 +526,39 @@ def main():
     print(f"Image backbone: {config.image_backbone}")
     print(f"Staged training: {config.staged_training}")
 
-    # Create dataloaders
-    train_loader, val_loader = create_dataloaders(config)
+    # Create dataloaders — 70/15/15 split of train2019
+    # test_loader is not used during training; it is used by evaluate.py
+    train_loader, val_loader, _ = create_dataloaders(config)
 
     if config.staged_training:
-        # Stage 1: Pretrain encoders separately
-        image_encoder = train_image_encoder_stage1(config, train_loader, val_loader)
-        text_encoder = train_text_encoder_stage1(config, train_loader, val_loader)
+        # Stage 1: Pretrain encoders separately (or load from disk to skip)
+        if args.load_image_encoder:
+            image_encoder = ImageEncoder(
+                backbone_name=config.image_backbone,
+                embed_dim=config.image_embed_dim,
+                pretrained=False,
+                dropout=config.image_dropout,
+            ).to(config.device)
+            image_encoder.load_state_dict(
+                torch.load(args.load_image_encoder, map_location=config.device)
+            )
+            print(f"Loaded image encoder from {args.load_image_encoder}")
+        else:
+            image_encoder = train_image_encoder_stage1(config, train_loader, val_loader)
+
+        if args.load_text_encoder:
+            text_encoder = TextEncoder(
+                model_name=config.text_model_name,
+                embed_dim=config.text_embed_dim,
+                dropout=config.text_dropout,
+                freeze_layers=config.freeze_text_layers,
+            ).to(config.device)
+            text_encoder.load_state_dict(
+                torch.load(args.load_text_encoder, map_location=config.device)
+            )
+            print(f"Loaded text encoder from {args.load_text_encoder}")
+        else:
+            text_encoder = train_text_encoder_stage1(config, train_loader, val_loader)
 
         # Stage 2: Build full model with pretrained encoders
         model = build_model(config)

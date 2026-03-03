@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchvision import transforms
 from transformers import DistilBertTokenizer
 
@@ -190,34 +190,64 @@ def get_val_transforms(config: Config) -> transforms.Compose:
 # ── DataLoader Factory ───────────────────────────────────────────────────
 
 
-def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader]:
-    """Create train and validation dataloaders."""
+def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Create train, val, and test dataloaders by splitting train2019 70/15/15.
+
+    val2019 and test2019 are not used because they contain multi-product
+    checkout tray images — a different task (detection) from single-product
+    classification. Splitting train2019 keeps all three sets on the same
+    distribution.
+
+    - train (70%): gradient updates
+    - val   (15%): early stopping and model selection during training
+    - test  (15%): final reported accuracy, never seen during training
+    """
     # Load OCR cache
     with open(config.ocr_cache_path, "r") as f:
         ocr_cache = json.load(f)
     print(f"Loaded OCR cache with {len(ocr_cache)} entries")
 
-    train_dataset = RPCMultimodalDataset(
+    # Build train2019 twice — train split gets augmentation transforms,
+    # val/test splits share the no-augmentation version.
+    # We can't reuse one instance because random_split returns Subsets that
+    # share the parent's transform, so val/test would be randomly augmented.
+    train_dataset_full = RPCMultimodalDataset(
         data_root=config.data_root,
         split="train2019",
         ocr_cache=ocr_cache,
         config=config,
         transform=get_train_transforms(config),
     )
-
-    val_dataset = RPCMultimodalDataset(
+    eval_dataset_full = RPCMultimodalDataset(
         data_root=config.data_root,
-        split="val2019",
+        split="train2019",
         ocr_cache=ocr_cache,
         config=config,
         transform=get_val_transforms(config),
     )
 
     # Update config with actual number of classes
-    config.num_classes = train_dataset.num_classes
+    config.num_classes = train_dataset_full.num_classes
+
+    # Reproducible 70/15/15 split
+    n_total = len(train_dataset_full)
+    n_val  = int(0.15 * n_total)
+    n_test = int(0.15 * n_total)
+    n_train = n_total - n_val - n_test
+
+    generator = torch.Generator().manual_seed(config.seed)
+    train_subset, val_subset_tmp, test_subset_tmp = random_split(
+        train_dataset_full, [n_train, n_val, n_test], generator=generator
+    )
+
+    # Point val and test at the no-augmentation dataset using the same indices
+    val_subset  = Subset(eval_dataset_full, val_subset_tmp.indices)
+    test_subset = Subset(eval_dataset_full, test_subset_tmp.indices)
+
+    print(f"Split: {n_train} train / {n_val} val / {n_test} test (70/15/15 of train2019)")
 
     train_loader = DataLoader(
-        train_dataset,
+        train_subset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
@@ -226,11 +256,19 @@ def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader]:
     )
 
     val_loader = DataLoader(
-        val_dataset,
+        val_subset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
         pin_memory=True,
     )
 
-    return train_loader, val_loader
+    test_loader = DataLoader(
+        test_subset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=True,
+    )
+
+    return train_loader, val_loader, test_loader
