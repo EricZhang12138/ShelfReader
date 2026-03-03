@@ -43,7 +43,7 @@ class Config:
     classifier_dropout: float = 0.4
 
     # ── Training ─────────────────────────────────────────────────────────
-    batch_size: int = 32
+    batch_size: int = 16
     num_workers: int = 4
     epochs: int = 50
     learning_rate: float = 1e-4
