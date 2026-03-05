@@ -493,6 +493,10 @@ def main():
                         help="Path to saved Stage 1 image encoder weights — skips Stage 1a")
     parser.add_argument("--load_text_encoder", type=str, default=None,
                         help="Path to saved Stage 1 text encoder weights — skips Stage 1b")
+    parser.add_argument("--stage1_only", action="store_true",
+                        help="Run Stage 1 encoder pretraining only, then exit. "
+                             "Weights are saved to checkpoint_dir. "
+                             "Run Stage 2 separately with --load_image_encoder and --load_text_encoder.")
     args = parser.parse_args()
 
     config = Config()
@@ -532,6 +536,10 @@ def main():
 
     if config.staged_training:
         # Stage 1: Pretrain encoders separately (or load from disk to skip)
+        if args.stage1_only and (args.load_image_encoder or args.load_text_encoder):
+            print("ERROR: --stage1_only and --load_*_encoder are mutually exclusive.")
+            return
+
         if args.load_image_encoder:
             image_encoder = ImageEncoder(
                 backbone_name=config.image_backbone,
@@ -559,6 +567,17 @@ def main():
             print(f"Loaded text encoder from {args.load_text_encoder}")
         else:
             text_encoder = train_text_encoder_stage1(config, train_loader, val_loader)
+
+        if args.stage1_only:
+            print("\nStage 1 complete. Exiting (--stage1_only).")
+            print(f"  Image encoder: {config.checkpoint_dir}/image_encoder_stage1.pth")
+            print(f"  Text encoder:  {config.checkpoint_dir}/text_encoder_stage1.pth")
+            print("\nTo run Stage 2:")
+            print(f"  python train.py --data_root {config.data_root} "
+                  f"--load_image_encoder {config.checkpoint_dir}/image_encoder_stage1.pth "
+                  f"--load_text_encoder {config.checkpoint_dir}/text_encoder_stage1.pth "
+                  f"--batch_size 16")
+            return
 
         # Stage 2: Build full model with pretrained encoders
         model = build_model(config)

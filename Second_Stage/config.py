@@ -10,13 +10,13 @@ from typing import Optional
 @dataclass
 class Config:
     # ── Paths ────────────────────────────────────────────────────────────
-    data_root: str = "/path/to/rpc_dataset"
+    data_root: str = "/path/to/GroceryStoreDataset/dataset"
     ocr_cache_path: str = "ocr_cache.json"
     checkpoint_dir: str = "checkpoints"
     log_dir: str = "logs"
 
     # ── Dataset ──────────────────────────────────────────────────────────
-    num_classes: int = 200           # RPC has ~200 SKUs
+    num_classes: int = 81            # GroceryStoreDataset has 81 fine-grained classes
     image_size: int = 224
     max_text_length: int = 128       # Max OCR token length
 

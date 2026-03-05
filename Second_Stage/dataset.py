@@ -1,37 +1,39 @@
 """
-Dataset loader for RPC with multimodal support (image + OCR text).
+Dataset loader for GroceryStoreDataset with multimodal support (image + OCR text).
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from transformers import DistilBertTokenizer
 
 from config import Config
 
 
-class RPCMultimodalDataset(Dataset):
+class GroceryMultimodalDataset(Dataset):
     """
-    RPC Dataset that returns (image_tensor, tokenized_text, label) tuples.
+    GroceryStoreDataset that returns (image_tensor, tokenized_text, label) tuples.
 
-    Expects COCO-format annotations:
+    Expects the dataset layout:
         data_root/
-            train2019/
-                image1.jpg
-                image2.jpg
+            train.txt
+            val.txt
+            test.txt
+            train/
+                Fruit/Apple/Golden-Delicious/Golden-Delicious_001.jpg
                 ...
-            val2019/
+            val/
                 ...
-            instances_train2019.json
-            instances_val2019.json
+            test/
+                ...
 
-    OCR text is loaded from a precomputed JSON cache.
+    Each line in the split files: "relative/path/to/image.jpg, fine_label, coarse_label"
+    OCR text is loaded from a precomputed JSON cache keyed by relative image path.
     """
 
     def __init__(
@@ -48,53 +50,26 @@ class RPCMultimodalDataset(Dataset):
         self.config = config
         self.transform = transform
 
-        # Initialize tokenizer for text branch
         self.tokenizer = DistilBertTokenizer.from_pretrained(config.text_model_name)
 
-        # Build image list and labels from COCO-format annotation file
+        # Parse split file: each line is "rel_path, fine_label, coarse_label"
+        split_file = self.data_root / f"{split}.txt"
+        if not split_file.exists():
+            raise FileNotFoundError(f"Split file not found: {split_file}")
+
         self.samples: List[Tuple[str, int]] = []
-        self.class_to_idx: Dict[int, int] = {}  # category_id -> contiguous index
+        with open(split_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                rel_path = parts[0]
+                fine_label = int(parts[1])
+                if (self.data_root / rel_path).exists():
+                    self.samples.append((rel_path, fine_label))
 
-        split_dir = self.data_root / split
-        if not split_dir.exists():
-            raise FileNotFoundError(f"Split directory not found: {split_dir}")
-
-        # Load COCO annotation file
-        ann_file = self.data_root / f"instances_{split}.json"
-        if not ann_file.exists():
-            raise FileNotFoundError(f"Annotation file not found: {ann_file}")
-
-        with open(ann_file, "r") as f:
-            coco = json.load(f)
-
-        # Build category_id -> contiguous index mapping
-        categories = sorted(coco["categories"], key=lambda c: c["id"])
-        for idx, cat in enumerate(categories):
-            self.class_to_idx[cat["id"]] = idx
-
-        # Build image_id -> filename mapping
-        id_to_filename = {img["id"]: img["file_name"] for img in coco["images"]}
-
-        # Build image_id -> category_id mapping from annotations
-        # RPC has one category per image, so we take the first annotation per image
-        id_to_category = {}
-        for ann in coco["annotations"]:
-            image_id = ann["image_id"]
-            if image_id not in id_to_category:
-                id_to_category[image_id] = ann["category_id"]
-
-        # Build samples list
-        for image_id, category_id in id_to_category.items():
-            filename = id_to_filename.get(image_id)
-            if filename is None:
-                continue
-            rel_path = os.path.join(split, filename)
-            label = self.class_to_idx[category_id]
-            # Verify image exists
-            if (self.data_root / rel_path).exists():
-                self.samples.append((rel_path, label))
-
-        self.num_classes = len(self.class_to_idx)
+        self.num_classes = max(label for _, label in self.samples) + 1
         print(f"[{split}] Loaded {len(self.samples)} samples, {self.num_classes} classes")
 
     def __len__(self) -> int:
@@ -191,80 +166,57 @@ def get_val_transforms(config: Config) -> transforms.Compose:
 
 
 def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Create train, val, and test dataloaders by splitting train2019 70/15/15.
+    """Create train, val, and test dataloaders from the pre-defined dataset splits.
 
-    val2019 and test2019 are not used because they contain multi-product
-    checkout tray images — a different task (detection) from single-product
-    classification. Splitting train2019 keeps all three sets on the same
-    distribution.
-
-    - train (70%): gradient updates
-    - val   (15%): early stopping and model selection during training
-    - test  (15%): final reported accuracy, never seen during training
+    GroceryStoreDataset provides train.txt, val.txt, and test.txt directly,
+    so no manual splitting is needed.
     """
-    # Load OCR cache
     with open(config.ocr_cache_path, "r") as f:
         ocr_cache = json.load(f)
     print(f"Loaded OCR cache with {len(ocr_cache)} entries")
 
-    # Build train2019 twice — train split gets augmentation transforms,
-    # val/test splits share the no-augmentation version.
-    # We can't reuse one instance because random_split returns Subsets that
-    # share the parent's transform, so val/test would be randomly augmented.
-    train_dataset_full = RPCMultimodalDataset(
+    train_dataset = GroceryMultimodalDataset(
         data_root=config.data_root,
-        split="train2019",
+        split="train",
         ocr_cache=ocr_cache,
         config=config,
         transform=get_train_transforms(config),
     )
-    eval_dataset_full = RPCMultimodalDataset(
+    val_dataset = GroceryMultimodalDataset(
         data_root=config.data_root,
-        split="train2019",
+        split="val",
+        ocr_cache=ocr_cache,
+        config=config,
+        transform=get_val_transforms(config),
+    )
+    test_dataset = GroceryMultimodalDataset(
+        data_root=config.data_root,
+        split="test",
         ocr_cache=ocr_cache,
         config=config,
         transform=get_val_transforms(config),
     )
 
-    # Update config with actual number of classes
-    config.num_classes = train_dataset_full.num_classes
-
-    # Reproducible 70/15/15 split
-    n_total = len(train_dataset_full)
-    n_val  = int(0.15 * n_total)
-    n_test = int(0.15 * n_total)
-    n_train = n_total - n_val - n_test
-
-    generator = torch.Generator().manual_seed(config.seed)
-    train_subset, val_subset_tmp, test_subset_tmp = random_split(
-        train_dataset_full, [n_train, n_val, n_test], generator=generator
-    )
-
-    # Point val and test at the no-augmentation dataset using the same indices
-    val_subset  = Subset(eval_dataset_full, val_subset_tmp.indices)
-    test_subset = Subset(eval_dataset_full, test_subset_tmp.indices)
-
-    print(f"Split: {n_train} train / {n_val} val / {n_test} test (70/15/15 of train2019)")
+    # num_classes is derived from training data
+    config.num_classes = train_dataset.num_classes
 
     train_loader = DataLoader(
-        train_subset,
+        train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
         pin_memory=True,
         drop_last=True,
     )
-
     val_loader = DataLoader(
-        val_subset,
+        val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
         pin_memory=True,
     )
-
     test_loader = DataLoader(
-        test_subset,
+        test_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
