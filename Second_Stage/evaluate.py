@@ -8,6 +8,10 @@ Outputs:
   - Analysis of fusion gate values (for gated fusion)
 """
 
+"""
+python evaluate.py --data_root --ocr_cache
+"""
+
 import argparse
 import os
 from collections import defaultdict
@@ -140,7 +144,7 @@ def main():
     args = parser.parse_args()
 
     # Load checkpoint
-    checkpoint = torch.load(args.checkpoint, map_location=args.device)
+    checkpoint = torch.load(args.checkpoint, map_location=args.device, weights_only = False)
     config = checkpoint.get("config", Config())
     config.device = args.device if torch.cuda.is_available() else "cpu"
     config.data_root = args.data_root
@@ -151,12 +155,9 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
 
-    # Recreate the same 70/15/15 split used during training.
-    # Using the same config.seed guarantees the test set is identical to
-    # what was held out during training — no data leakage.
+    # Evaluate on the held-out test set (half of original test split)
     _, _, test_loader = create_dataloaders(config)
 
-    # Run evaluation on the held-out test set
     preds, labels, probs = evaluate(model, test_loader, config)
     metrics = compute_metrics(preds, labels, probs, config.num_classes)
 

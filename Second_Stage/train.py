@@ -9,6 +9,12 @@ Supports:
   - Mixup augmentation
   - Early stopping
 """
+"""
+How to run: 
+python train.py \
+--data_root ....
+--ocr_cache ocr_cache.json
+"""
 
 import argparse
 import json
@@ -26,7 +32,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from config import Config
-from dataset import create_dataloaders
+from dataset import create_dataloaders, create_text_only_dataloaders
 from models import (
     ImageEncoder,
     ImageClassifier,
@@ -455,7 +461,7 @@ def evaluate_multimodal(model, val_loader, criterion, config):
         attention_mask = batch["attention_mask"].to(config.device)
         labels = batch["label"].to(config.device)
 
-        with autocast(enabled=config.fp16):
+        with autocast("cuda",enabled=config.fp16):
             logits = model(images, input_ids, attention_mask)
             loss = criterion(logits, labels)
 
@@ -530,8 +536,8 @@ def main():
     print(f"Image backbone: {config.image_backbone}")
     print(f"Staged training: {config.staged_training}")
 
-    # Create dataloaders — 70/15/15 split of train2019
-    # test_loader is not used during training; it is used by evaluate.py
+    # Create dataloaders — train + half test for training, val for validation,
+    # other half test held out for final evaluation
     train_loader, val_loader, _ = create_dataloaders(config)
 
     if config.staged_training:
@@ -566,7 +572,9 @@ def main():
             )
             print(f"Loaded text encoder from {args.load_text_encoder}")
         else:
-            text_encoder = train_text_encoder_stage1(config, train_loader, val_loader)
+            # Use OCR-only samples for text encoder pretraining
+            text_train_loader, text_val_loader = create_text_only_dataloaders(config)
+            text_encoder = train_text_encoder_stage1(config, text_train_loader, text_val_loader)
 
         if args.stage1_only:
             print("\nStage 1 complete. Exiting (--stage1_only).")

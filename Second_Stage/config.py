@@ -10,7 +10,7 @@ from typing import Optional
 @dataclass
 class Config:
     # ── Paths ────────────────────────────────────────────────────────────
-    data_root: str = "/path/to/GroceryStoreDataset/dataset"
+    data_root: str = "/mnt/external/home/YuouZhang/Documents_external/GroceryStoreDataset/dataset"
     ocr_cache_path: str = "ocr_cache.json"
     checkpoint_dir: str = "checkpoints"
     log_dir: str = "logs"
@@ -21,20 +21,20 @@ class Config:
     max_text_length: int = 128       # Max OCR token length
 
     # ── Image Encoder ────────────────────────────────────────────────────
-    image_backbone: str = "efficientnet_b4"   # Options: efficientnet_b4, convnext_small, vit_small_patch16_224
-    image_embed_dim: int = 512
+    image_backbone: str = "efficientnet_b0"   # Options: efficientnet_b4, convnext_small, vit_small_patch16_224
+    image_embed_dim: int = 256
     image_pretrained: bool = True
     image_dropout: float = 0.3
 
     # ── Text Encoder ─────────────────────────────────────────────────────
-    text_model_name: str = "distilbert-base-uncased"
-    text_embed_dim: int = 512
+    text_model_name: str = "huawei-noah/TinyBERT_General_4L_312D"
+    text_embed_dim: int = 256
     text_dropout: float = 0.2
     freeze_text_layers: int = 4      # Freeze first N transformer layers
 
     # ── Fusion ───────────────────────────────────────────────────────────
     fusion_strategy: str = "gated"   # Options: concat, gated, cross_attention
-    fused_dim: int = 512
+    fused_dim: int = 256
     fusion_dropout: float = 0.3
     cross_attention_heads: int = 4   # Only used if fusion_strategy == "cross_attention"
 
@@ -53,7 +53,7 @@ class Config:
 
     # Staged training: pretrain encoders separately before end-to-end
     staged_training: bool = True
-    stage1_epochs: int = 15          # Epochs for individual encoder pretraining
+    stage1_epochs: int = 20          # Epochs for individual encoder pretraining
     stage1_lr: float = 3e-4
 
     # ── Augmentation ─────────────────────────────────────────────────────
@@ -68,4 +68,4 @@ class Config:
     device: str = "cuda"
     fp16: bool = True                # Mixed precision training
     save_top_k: int = 3
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 15
