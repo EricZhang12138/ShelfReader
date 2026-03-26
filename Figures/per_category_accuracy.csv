@@ -1,0 +1,4 @@
+category,image_only_correct,image_only_total,image_only_acc,concat_correct,concat_total,concat_acc,gated_correct,gated_total,gated_acc,cross_attention_correct,cross_attention_total,cross_attention_acc,score_fusion_correct,score_fusion_total,score_fusion_acc
+Fruit,708,1117,63.38,709,1117,63.47,706,1117,63.20,713,1117,63.83,716,1117,64.10
+Packages,577,781,73.91,670,781,85.77,665,781,85.13,676,781,86.54,690,781,88.33
+Vegetables,433,587,73.82,436,587,74.33,434,587,73.99,441,587,75.18,449,587,76.54

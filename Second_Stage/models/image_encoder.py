@@ -55,12 +55,17 @@ class ImageEncoder(nn.Module):
         )
         self.embed_dim = embed_dim
 
-        # Get backbone output dimension
+        # Get backbone output dimensions
         with torch.no_grad(): #torch.no_grad() tells PyTorch not to track gradients for operations inside this block.
             dummy = torch.randn(1, 3, 224, 224)
             backbone_dim = self.backbone(dummy).shape[1]
+            spatial_features = self.backbone.forward_features(dummy)
+            if spatial_features.dim() == 4:
+                spatial_dim = spatial_features.shape[1]
+            else:
+                spatial_dim = spatial_features.shape[-1]
 
-        # Projection head: backbone features → embed_dim
+        # Projection head: pooled backbone features → embed_dim
         self.projection = nn.Sequential(
             nn.Linear(backbone_dim, embed_dim),
             nn.ReLU(inplace=True),
@@ -68,7 +73,15 @@ class ImageEncoder(nn.Module):
             nn.LayerNorm(embed_dim),
         )
 
-        print(f"[ImageEncoder] {backbone_name}: {backbone_dim} → {embed_dim}")
+        # Spatial projection: unpooled spatial features → embed_dim (for cross-attention)
+        self.spatial_projection = nn.Sequential(
+            nn.Linear(spatial_dim, embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.LayerNorm(embed_dim),
+        )
+
+        print(f"[ImageEncoder] {backbone_name}: {backbone_dim} → {embed_dim} (spatial: {spatial_dim})")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -81,6 +94,23 @@ class ImageEncoder(nn.Module):
         x_img = self.projection(features)  # [B, embed_dim]
         return x_img
 
+    def forward_seq(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Return spatial feature sequence (before global pooling) for cross-attention.
+
+        Args:
+            x: Image tensor [B, 3, H, W]
+        Returns:
+            x_seq: Spatial features [B, H*W, embed_dim]
+        """
+        features = self.backbone.forward_features(x)  # [B, C, H, W] for CNNs
+        if features.dim() == 4:
+            B, C, H, W = features.shape
+            features = features.reshape(B, C, H * W).permute(0, 2, 1)  # [B, H*W, C]
+        # features is now [B, num_tokens, spatial_dim]
+        x_seq = self.spatial_projection(features)  # [B, num_tokens, embed_dim]
+        return x_seq
+
     def freeze_backbone(self, freeze: bool = True) -> None:
         """Freeze/unfreeze backbone parameters for staged training."""
         for param in self.backbone.parameters():
@@ -91,6 +121,10 @@ class ImageClassifier(nn.Module):
     """
     Standalone image classifier for Stage 1 pretraining.
     ImageEncoder + classification head.
+
+    Trains both the pooled path (projection) and the spatial path
+    (spatial_projection) so that cross-attention fusion can use
+    pretrained spatial features in Stage 2.
     """
 
     def __init__(self, encoder: ImageEncoder, num_classes: int, hidden_dim: int = 256):
@@ -102,7 +136,26 @@ class ImageClassifier(nn.Module):
             nn.Dropout(0.3),
             nn.Linear(hidden_dim, num_classes),
         )
+        # Auxiliary head for spatial path — ensures spatial_projection gets gradients
+        self.spatial_head = nn.Sequential(
+            nn.Linear(encoder.embed_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, num_classes),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = self.encoder(x)
-        return self.head(features)
+        # Primary path: pooled features
+        pooled = self.encoder(x)
+        logits = self.head(pooled)
+
+        if self.training:
+            # Auxiliary path: spatial features → mean pool → classify
+            # This trains spatial_projection alongside the main path
+            spatial_seq = self.encoder.forward_seq(x)       # [B, H*W, embed_dim]
+            spatial_pooled = spatial_seq.mean(dim=1)         # [B, embed_dim]
+            aux_logits = self.spatial_head(spatial_pooled)   # [B, num_classes]
+            # Combine losses (main + 0.5 * auxiliary)
+            return logits, aux_logits
+
+        return logits

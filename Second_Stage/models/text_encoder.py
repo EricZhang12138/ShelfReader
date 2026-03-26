@@ -1,25 +1,26 @@
 """
-Text Encoder: DistilBERT-based encoder for OCR-extracted text.
+Text Encoder: Transformer-based encoder for OCR-extracted text.
 
+Supports BERT, TinyBERT, DistilBERT, and multilingual variants via AutoModel.
 Takes tokenized OCR text and produces a fixed-size embedding.
 """
 
 import torch
 import torch.nn as nn
-from transformers import DistilBertModel
+from transformers import AutoModel
 
 
 class TextEncoder(nn.Module):
     """
-    Encodes OCR text into a fixed-size embedding using DistilBERT.
+    Encodes OCR text into a fixed-size embedding.
 
     Architecture:
-        DistilBERT → [CLS] token → FC → ReLU → Dropout → x_txt
+        Transformer → [CLS] token → FC → ReLU → Dropout → x_txt
     """
 
     def __init__(
         self,
-        model_name: str = "distilbert-base-uncased",
+        model_name: str = "distilbert-base-multilingual-cased",
         embed_dim: int = 512,
         dropout: float = 0.2,
         freeze_layers: int = 4,
@@ -27,51 +28,54 @@ class TextEncoder(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
 
-        self.bert = DistilBertModel.from_pretrained(model_name)
-        bert_hidden = self.bert.config.hidden_size  # 768 for distilbert-base
+        self.transformer = AutoModel.from_pretrained(model_name)
+        hidden_size = self.transformer.config.hidden_size
+
+        # Detect model architecture for layer freezing
+        # DistilBERT: model.embeddings + model.transformer.layer
+        # BERT/TinyBERT: model.embeddings + model.encoder.layer
+        if hasattr(self.transformer, "transformer"):
+            layers = self.transformer.transformer.layer
+        else:
+            layers = self.transformer.encoder.layer
 
         # Freeze early transformer layers to save compute and prevent overfitting
         if freeze_layers > 0:
-            # Freeze embeddings
-            for param in self.bert.embeddings.parameters():
+            for param in self.transformer.embeddings.parameters():
                 param.requires_grad = False
-            # Freeze first N transformer layers
-            for i in range(min(freeze_layers, len(self.bert.transformer.layer))):
-                for param in self.bert.transformer.layer[i].parameters():
+            for i in range(min(freeze_layers, len(layers))):
+                for param in layers[i].parameters():
                     param.requires_grad = False
-            print(f"[TextEncoder] Froze embeddings + {freeze_layers} transformer layers")
+            print(f"[TextEncoder] Froze embeddings + {freeze_layers}/{len(layers)} transformer layers")
 
-        # Projection: BERT hidden → embed_dim
+        # Projection: hidden → embed_dim
         self.projection = nn.Sequential(
-            nn.Linear(bert_hidden, embed_dim),
+            nn.Linear(hidden_size, embed_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.LayerNorm(embed_dim),
         )
 
-        print(f"[TextEncoder] {model_name}: {bert_hidden} → {embed_dim}")
+        print(f"[TextEncoder] {model_name}: {hidden_size} → {embed_dim}")
 
     def forward(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Args:
-            input_ids:      [B, seq_len]
-            attention_mask:  [B, seq_len]
-        Returns:
-            x_txt: Text embedding [B, embed_dim]
-        """
-        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-
-        # Use [CLS] token representation (first token)
-        cls_output = outputs.last_hidden_state[:, 0, :]  # [B, bert_hidden]
-
-        x_txt = self.projection(cls_output)  # [B, embed_dim]
+        outputs = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
+        cls_output = outputs.last_hidden_state[:, 0, :]
+        x_txt = self.projection(cls_output)
         return x_txt
 
+    def forward_seq(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        outputs = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
+        all_tokens = outputs.last_hidden_state
+        x_seq = self.projection(all_tokens)
+        return x_seq, attention_mask
+
     def freeze_all(self, freeze: bool = True) -> None:
-        """Freeze/unfreeze all BERT parameters."""
-        for param in self.bert.parameters():
+        for param in self.transformer.parameters():
             param.requires_grad = not freeze
 
 

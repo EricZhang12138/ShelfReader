@@ -24,6 +24,7 @@ class MultimodalClassifier(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
+        self.use_cross_attention = (config.fusion_strategy == "cross_attention")
 
         # ── Encoders ─────────────────────────────────────────────────────
         self.image_encoder = ImageEncoder(
@@ -79,12 +80,16 @@ class MultimodalClassifier(nn.Module):
         Returns:
             logits: [B, num_classes]
         """
-        # Encode both modalities
-        x_img = self.image_encoder(image)                          # [B, image_embed_dim]
-        x_txt = self.text_encoder(input_ids, attention_mask)       # [B, text_embed_dim]
-
-        # Fuse
-        x_fused = self.fusion(x_img, x_txt)                       # [B, fused_dim]
+        if self.use_cross_attention:
+            # Sequence-level features for meaningful cross-attention
+            img_seq = self.image_encoder.forward_seq(image)                    # [B, S_img, embed_dim]
+            txt_seq, txt_mask = self.text_encoder.forward_seq(input_ids, attention_mask)  # [B, S_txt, embed_dim], [B, S_txt]
+            x_fused = self.fusion(img_seq, txt_seq, txt_mask)                  # [B, fused_dim]
+        else:
+            # Pooled embeddings for concat/gated fusion
+            x_img = self.image_encoder(image)                          # [B, image_embed_dim]
+            x_txt = self.text_encoder(input_ids, attention_mask)       # [B, text_embed_dim]
+            x_fused = self.fusion(x_img, x_txt)                       # [B, fused_dim]
 
         # Classify
         logits = self.classifier(x_fused)                          # [B, num_classes]
@@ -97,10 +102,16 @@ class MultimodalClassifier(nn.Module):
         attention_mask: torch.Tensor,
     ) -> dict:
         """Return intermediate embeddings for analysis/visualization."""
-        x_img = self.image_encoder(image)
-        x_txt = self.text_encoder(input_ids, attention_mask)
-        x_fused = self.fusion(x_img, x_txt)
-        return {"x_img": x_img, "x_txt": x_txt, "x_fused": x_fused}
+        if self.use_cross_attention:
+            img_seq = self.image_encoder.forward_seq(image)
+            txt_seq, txt_mask = self.text_encoder.forward_seq(input_ids, attention_mask)
+            x_fused = self.fusion(img_seq, txt_seq, txt_mask)
+            return {"img_seq": img_seq, "txt_seq": txt_seq, "txt_mask": txt_mask, "x_fused": x_fused}
+        else:
+            x_img = self.image_encoder(image)
+            x_txt = self.text_encoder(input_ids, attention_mask)
+            x_fused = self.fusion(x_img, x_txt)
+            return {"x_img": x_img, "x_txt": x_txt, "x_fused": x_fused}
 
 
 def build_model(config: Config) -> MultimodalClassifier:

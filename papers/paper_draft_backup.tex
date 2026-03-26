@@ -1,0 +1,620 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.75in, top=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{caption}
+
+% Running header
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\small MLP Coursework 4 -- Final Report (s2286795)}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Compact spacing
+\setlength{\parskip}{0.5em}
+\setlength{\columnsep}{0.3in}
+
+% Placeholder command for numbers to fill in
+\newcommand{\TODO}[1]{\textcolor{red}{[#1]}}
+
+\bibliographystyle{abbrvnat}
+\setcitestyle{authoryear,open={(},close={)}}
+
+\title{\vspace{-1cm}Comparing Multimodal Fusion Strategies for Fine-Grained\\Grocery Product Identification}
+\author{s2286795}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+% ============================================================================
+\begin{abstract}
+% ============================================================================
+Fine-grained grocery product identification is a persistent accessibility challenge for blind and visually impaired (BVI) users, where visually similar products---such as full-fat and semi-skimmed milk from the same brand---differ only in small textual details on their packaging. In this work, we present a comparative evaluation of four multimodal fusion architectures that combine visual features from a pretrained CNN with OCR-extracted text to perform fine-grained product classification. Specifically, we evaluate concatenation fusion, gated fusion, cross-attention fusion, and a lightweight fuzzy score fusion approach, benchmarking all four against an image-only baseline on the GroceryStoreDataset (81 classes, 5,421 images). To address the challenges of training on a small dataset, we employ aggressive data augmentation, staged encoder pretraining, and systematic text encoder layer freezing as regularisation strategies. Our results show that score fusion achieves 75.61\% top-1 accuracy, outperforming the image-only baseline by 5.5 percentage points and the best neural fusion method (cross-attention, 73.54\%) by 2.1 points. A modality contribution analysis confirms that both modalities contribute to all fusion methods, with cross-attention showing the largest text contribution (+6.26 points) and gated fusion the smallest (+2.34 points), reflecting the gate's learned preference for image features when text is unreliable.
+\end{abstract}
+
+% ============================================================================
+\section{Introduction}
+\label{sec:introduction}
+% ============================================================================
+
+Grocery product identification is a key accessibility challenge for blind and visually impaired (BVI) users: 41\% of visual questions submitted by blind users involve food items \citep{brady2013visual}, and distinguishing visually similar products---such as different milk fat percentages from the same brand---remains difficult even for state-of-the-art vision-language models \citep{garg2025trained, mathis2025lifeinsight}. These products often differ only in small textual details on their packaging, motivating systems that combine visual features with OCR-extracted text. While several works have explored multimodal approaches for grocery recognition, there has been no systematic comparison of fusion strategies on a public benchmark. We address this gap by answering:
+
+\textit{Which multimodal fusion strategy best combines visual and OCR-derived textual features for fine-grained grocery product identification, and under what conditions does each approach succeed or fail?}
+
+Specifically, our contributions are:
+
+\begin{itemize}[nosep,leftmargin=*]
+    \item We evaluate four multimodal fusion architectures (concatenation, gated, cross-attention, and fuzzy score fusion) on the publicly available GroceryStoreDataset \citep{klasson2019hierarchical}, providing a controlled comparison on the same dataset, encoders, and training procedure.
+    \item We perform a modality contribution analysis quantifying when and how much OCR text improves over image-only classification, broken down by product category.
+    \item We investigate text encoder layer freezing as a regularisation strategy for small-dataset multimodal training, systematically varying the number of frozen layers.
+\end{itemize}
+
+All our experiments are based on the GroceryStoreDataset, a public collection of 5,421 grocery product images across 81 fine-grained classes captured under naturalistic conditions. Figure~\ref{fig:overall} illustrates the overall multimodal pipeline: a product image is processed by both an image encoder and an OCR-to-text encoder, whose features are combined via a fusion module before classification.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.85\textwidth]{overall.jpg}
+    \caption{Overall multimodal architecture. A product image is processed through two paths: (1) an image model extracts visual features, and (2) OCR extracts text from packaging, which is encoded by a text model. The two feature representations are combined via a multimodal fusion module, and the fused representation is passed to a classifier to produce the product label.}
+    \label{fig:overall}
+\end{figure*}
+
+
+% ============================================================================
+\section{Background}
+\label{sec:background}
+% ============================================================================
+
+\subsection{Transfer Learning with CNNs}
+
+When labelled data is limited, training a CNN from scratch leads to overfitting. Transfer learning addresses this by fine-tuning a network pretrained on ImageNet \citep{krizhevsky2012imagenet}. We use MobileNetV3 \citep{howard2019mobilenet}, a lightweight architecture designed for mobile deployment. MobileNetV3 outputs a 1,024-dimensional feature vector after global average pooling, which we project to a 256-dimensional embedding:
+\begin{equation}
+    \mathbf{x}_{\text{img}} = \text{LN}(\text{Drop}(\text{ReLU}(W_p \cdot \text{Pool}(f(\mathbf{I})))))
+\end{equation}
+where $f$ is the pretrained backbone and $W_p \in \mathbb{R}^{256 \times 1024}$.
+
+\subsection{Transformer-Based Text Encoding}
+
+We encode OCR text using TinyBERT \citep{jiao2020tinybert}, a distilled BERT model \citep{devlin2019bert} with 4 transformer layers and 312 hidden dimensions. The \texttt{[CLS]} token representation is projected to produce the text embedding:
+\begin{equation}
+    \mathbf{x}_{\text{txt}} = \text{LN}(\text{Drop}(\text{ReLU}(W_t \cdot \mathbf{h}_{\text{[CLS]}}))) \in \mathbb{R}^{256}
+\end{equation}
+To regularise on our small dataset, we freeze the first $N$ of TinyBERT's 4 transformer layers, systematically varying $N \in \{0, 1, 2, 3, 4\}$ to find the optimal tradeoff between adaptation and regularisation.
+
+\subsection{Multimodal Fusion}
+
+Fusion methods can be categorised into three types \citep{pettersson2024multimodal}:
+
+\begin{itemize}[nosep,leftmargin=*]
+    \item \textbf{Early fusion}: raw features from both modalities are concatenated before any processing.
+    \item \textbf{Late fusion}: separate classifiers produce independent predictions that are aggregated (e.g., by averaging or voting).
+    \item \textbf{Cross-modal fusion}: intermediate features from both modalities interact during learning, allowing complex cross-modal relationships.
+\end{itemize}
+
+Our four fusion strategies span this spectrum: concatenation is an early fusion method, score fusion is a form of late fusion, and gated and cross-attention fusion are cross-modal approaches.
+
+% ============================================================================
+\section{Dataset and Task}
+\label{sec:dataset}
+% ============================================================================
+
+\subsection{Dataset}
+
+We use the GroceryStoreDataset introduced by \citet{klasson2019hierarchical}, a publicly available collection of 5,421 images covering 81 fine-grained product classes organised into a three-level hierarchy: coarse-grained category (e.g., Fruit), fine-grained category (e.g., Apple), and product instance (e.g., Royal Gala). The images were captured in real grocery stores using mobile phone cameras under naturalistic conditions, including varying lighting, viewpoints, and degrees of clutter.
+
+The dataset contains a natural mix of product types: packaged items (milk cartons, juice bottles, yoghurt containers) that typically have visible text on their packaging, and unpackaged items (fruits and vegetables) that have no packaging text. This makes it particularly suitable for studying multimodal fusion, as it requires architectures that can leverage text when available while still performing well without it.
+
+We use the official dataset splits: 2,640 images for training, 2,485 for testing, and an additional 296 validation images provided separately in the dataset (5,421 images in total across all three splits). The number of images per class ranges from 30 to 138, with an average of approximately 32 training images per class.
+
+\subsection{OCR Preprocessing}
+
+We extract text from all images using PaddleOCR and cache the results. Only 37\% of images yield non-empty OCR text. As shown in Figure~\ref{fig:ocr_coverage}, OCR coverage varies dramatically by product category: packaged goods (dairy, juice, yoghurt) achieve 91\% coverage, while fruits (12\%) and vegetables (8\%) rarely yield text. This means that for the majority of images, the multimodal models must rely on visual features alone, making it essential that fusion architectures degrade gracefully when text is absent. The dataset also contains Swedish packaging, which presents an additional challenge for OCR and text matching.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\columnwidth]{ocr_coverage_by_category.png}
+    \caption{OCR text coverage by product category. Packaged goods have near-complete coverage (91\%), while unpackaged produce rarely yields text. This asymmetry is the central challenge for multimodal fusion on this dataset.}
+    \label{fig:ocr_coverage}
+\end{figure}
+
+\subsection{Task and Evaluation Metrics}
+
+Given a single image of a grocery product, the system must classify it into one of 81 fine-grained product classes. We evaluate all models using:
+
+\begin{itemize}[nosep,leftmargin=*]
+    \item \textbf{Top-1 accuracy}: percentage of correctly classified test samples.
+    \item \textbf{Top-5 accuracy}: percentage of samples where the correct class appears in the top 5 predictions.
+    \item \textbf{Macro F1}: unweighted mean of per-class F1 scores, giving equal weight to each class regardless of sample count.
+    \item \textbf{Weighted F1}: sample-weighted mean of per-class F1 scores.
+\end{itemize}
+
+
+% ============================================================================
+\section{Methodology}
+\label{sec:method}
+% ============================================================================
+
+\subsection{System Overview}
+
+Our system takes a single product image as input, extracts visual features using a pretrained CNN, and optionally incorporates OCR text to produce a fine-grained classification. The architecture is modular: a shared image encoder and text encoder feed into an interchangeable fusion module, followed by a classification head. We evaluate four fusion strategies while keeping the encoders and classifier fixed, ensuring a fair comparison.
+
+\subsection{Fusion Strategies}
+
+\subsubsection{Concatenation Fusion}
+
+The simplest approach concatenates the image and text embeddings and projects the result:
+\begin{equation}
+    \mathbf{x}_{\text{fused}} = \text{LN}(\text{Drop}(\text{ReLU}(W_c [\mathbf{x}_{\text{img}}; \mathbf{x}_{\text{txt}}])))
+\end{equation}
+where $[\cdot;\cdot]$ denotes concatenation and $W_c \in \mathbb{R}^{256 \times 512}$. This imposes no inductive bias about modality importance; the downstream classifier must learn how to weight the features. Its simplicity makes it a useful baseline, but it cannot dynamically adjust when one modality is uninformative. The full architecture is illustrated in Figure~\ref{fig:concat} (Appendix~\ref{sec:appendix}).
+
+\subsubsection{Gated Fusion}
+
+Gated fusion introduces a learned gate that dynamically weights each modality's contribution. This is motivated by the observation that OCR text is informative for some products (e.g., milk variants distinguished by fat percentage) but absent for others (e.g., unpackaged fruits). Both modalities are first projected to a common space:
+\begin{align}
+    \mathbf{h}_{\text{img}} &= \text{ReLU}(W_{\text{img}} \mathbf{x}_{\text{img}}) \\
+    \mathbf{h}_{\text{txt}} &= \text{ReLU}(W_{\text{txt}} \mathbf{x}_{\text{txt}})
+\end{align}
+A gating vector is computed from their concatenation:
+\begin{equation}
+    \mathbf{g} = \sigma(W_g [\mathbf{h}_{\text{img}}; \mathbf{h}_{\text{txt}}]) \in [0, 1]^{256}
+\end{equation}
+where $\sigma$ is the sigmoid function. The fused representation is the element-wise weighted combination:
+\begin{equation}
+    \mathbf{x}_{\text{fused}} = \text{LN}(\text{Drop}(\mathbf{g} \odot \mathbf{h}_{\text{img}} + (1 - \mathbf{g}) \odot \mathbf{h}_{\text{txt}}))
+\end{equation}
+
+When the text modality is uninformative (e.g., a \texttt{[UNK]} placeholder for unpackaged fruit), the gate can learn values close to 1, effectively reducing the model to image-only classification. The full architecture is illustrated in Figure~\ref{fig:gated} (Appendix~\ref{sec:appendix}).
+
+\subsubsection{Cross-Attention Fusion}
+
+Cross-attention is the most expressive strategy, operating on token-level sequences from both modalities rather than pooled embeddings. This enables fine-grained interactions---for example, a colour region on packaging might attend to ``strawberry'' in the OCR output.
+
+For cross-attention, both encoders produce sequences instead of single vectors: the image encoder outputs spatial features $\mathbf{X}_{\text{img}} \in \mathbb{R}^{S_{\text{img}} \times 256}$ (reshaped from CNN feature maps), and the text encoder outputs all token embeddings $\mathbf{X}_{\text{txt}} \in \mathbb{R}^{S_{\text{txt}} \times 256}$. Two cross-attention operations are performed using multi-head attention with 4 heads:
+\begin{align}
+    \tilde{\mathbf{X}}_{\text{img}} &= \text{MHA}(Q\!=\!\mathbf{X}_{\text{img}}, K\!=\!\mathbf{X}_{\text{txt}}, V\!=\!\mathbf{X}_{\text{txt}}) \\
+    \tilde{\mathbf{X}}_{\text{txt}} &= \text{MHA}(Q\!=\!\mathbf{X}_{\text{txt}}, K\!=\!\mathbf{X}_{\text{img}}, V\!=\!\mathbf{X}_{\text{img}})
+\end{align}
+The attended sequences are pooled (mean pooling for image tokens; masked mean pooling for text tokens to handle padding) and combined:
+\begin{equation}
+    \mathbf{x}_{\text{fused}} = f_{\text{out}}([\text{Pool}(\tilde{\mathbf{X}}_{\text{img}}); \text{MPool}(\tilde{\mathbf{X}}_{\text{txt}})])
+\end{equation}
+where $f_{\text{out}}$ is a linear projection with ReLU, dropout, and layer normalisation. While cross-attention is the most expressive, it is also the most computationally expensive and potentially data-hungry, which may limit its effectiveness on our small dataset. The full architecture is illustrated in Figure~\ref{fig:crossattn} (Appendix~\ref{sec:appendix}).
+
+\subsubsection{Score Fusion (Fuzzy Matching)}
+
+Score fusion takes a fundamentally different approach by replacing the learned text encoder with a non-parametric fuzzy string matcher. For each of the 81 product classes, we define a set of known names and aliases $\mathcal{A}_c$ (including Swedish translations, since the GroceryStoreDataset contains Swedish packaging). Given OCR text, the scorer computes a similarity against each class:
+\begin{equation}
+    s_c = \max_{a \in \mathcal{A}_c} \frac{\text{TokenSetRatio}(\text{ocr},\; a)}{100}
+\end{equation}
+producing a score vector $\mathbf{s} \in [0, 1]^{81}$. This is combined with image classifier logits via a single \emph{learned} scalar parameter:
+\begin{equation}
+    \mathbf{y} = \mathbf{y}_{\text{img}} + \alpha \cdot \mathbf{s}
+\end{equation}
+Crucially, $\alpha$ is \emph{not} a fixed hyperparameter---it is a trainable parameter initialised to 0 and optimised end-to-end via backpropagation alongside the image encoder. This means the model starts as a pure image classifier and the optimiser gradually discovers the appropriate weight for the text signal based on the training data. The final learned value of $\alpha$ serves as interpretable evidence of how much the fuzzy text scores contribute: a large positive $\alpha$ indicates that text matching is a useful complementary signal, while a value near zero would indicate the model found text unreliable. This avoids the need for manual tuning of modality weights. For samples without OCR text, $\mathbf{s}$ is zeroed out, ensuring clean fallback to image-only prediction.
+
+This approach has two practical advantages: (1) no text encoder at inference time, reducing model size and latency; (2) interpretable per-class scores. Its disadvantage is requiring predefined class names, limiting scalability. The full architecture is illustrated in Figure~\ref{fig:scorefusion} (Appendix~\ref{sec:appendix}).
+
+\subsection{Classification Head}
+
+For all neural fusion strategies, $\mathbf{x}_{\text{fused}} \in \mathbb{R}^{256}$ is passed through a two-layer classifier:
+\begin{equation}
+    \mathbf{y} = W_2 \cdot \text{Drop}(\text{ReLU}(W_1 \mathbf{x}_{\text{fused}}))
+\end{equation}
+where $W_1 \in \mathbb{R}^{256 \times 256}$, $W_2 \in \mathbb{R}^{81 \times 256}$, and dropout $p = 0.5$.
+
+\subsection{Training Strategy}
+
+\subsubsection{Addressing Overfitting}
+
+With only ${\sim}32$ images per class, overfitting is the primary challenge. We employ: (1) staged pretraining of encoders before end-to-end training; (2) 8 data augmentation strategies (Table~\ref{tab:augmentation}); (3) heavy regularisation (dropout $p = 0.3$--$0.5$, label smoothing $\epsilon = 0.1$, weight decay $10^{-4}$, gradient clipping); (4) text encoder layer freezing; (5) compact models (TinyBERT 14.5M params, MobileNetV3); (6) early stopping (patience 15 epochs); and (7) differential learning rates ($0.1\times$ for pretrained encoders). As shown in Table~\ref{tab:overfitting}, all models exhibit train-val gaps in the 14--16\% range, indicating controlled overfitting.
+
+\begin{table}[t]
+\centering
+\caption{Train-val accuracy gap at best epoch. All gaps are in a narrow 14--16\% range, indicating controlled overfitting.}
+\label{tab:overfitting}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Model} & \textbf{Epoch} & \textbf{Train} & \textbf{Val} & \textbf{Gap} \\
+\midrule
+Image-only   & 44 & 84.06 & 70.65 & 14.41 \\
+Concat       & 43 & 88.82 & 73.30 & 15.52 \\
+Gated        & 29 & 88.62 & 73.01 & 15.01 \\
+Cross-attn   & 42 & 89.33 & 74.65 & 14.68 \\
+Score fusion & 36 & 92.40 & 77.64 & 14.76 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Staged Training}
+
+In Stage~1, encoders are pretrained independently for 20 epochs (text encoder on OCR-text samples only). An auxiliary spatial head ensures the image encoder's spatial projection receives gradients for cross-attention. In Stage~2, the full model trains end-to-end with differential learning rates ($1 \times 10^{-5}$ for encoders, $1 \times 10^{-4}$ for fusion/classifier).
+
+\subsubsection{Data Augmentation}
+
+Table~\ref{tab:augmentation} lists the augmentation pipeline, which simulates realistic capture conditions. Mixup \citep{zhang2018mixup} is applied to 50\% of batches but disabled for cross-attention (mixed images do not correspond to text tokens).
+
+\begin{table}[t]
+\centering
+\caption{Data augmentation pipeline applied during training.}
+\label{tab:augmentation}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Augmentation} & \textbf{Parameters} \\
+\midrule
+RandomResizedCrop & scale $[0.7, 1.0]$ \\
+RandomHorizontalFlip & $p = 0.5$ \\
+RandomRotation & $\pm 15^{\circ}$ \\
+RandomPerspective & distortion $0.2$, $p = 0.3$ \\
+ColorJitter & bright. $0.3$, contr. $0.3$ \\
+GaussianBlur & $\sigma \in [0.1, 2.0]$ \\
+Cutout & 1 hole, $32 \!\times\! 32$ px \\
+Mixup & $\alpha = 0.2$, 50\% of batches \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The learning rate follows a linear warmup over 5 epochs followed by cosine annealing.
+
+
+% ============================================================================
+\section{Experiments}
+\label{sec:experiments}
+% ============================================================================
+
+All experiments use the hyperparameters summarised in Table~\ref{tab:hyperparams}. To reduce the number of experimental variables and focus on the impact of fusion strategy, we keep the image backbone (MobileNetV3), text model (TinyBERT), embedding dimensions (256), and training procedure fixed across all experiments. All experiments are conducted on an NVIDIA GeForce RTX 3060 Laptop GPU (6\,GB VRAM) using a single seed (42), applied to Python, NumPy, and PyTorch CPU/CUDA with \texttt{cudnn.deterministic = True} for reproducibility.
+
+\begin{table}[t]
+\centering
+\caption{Experimental hyperparameters, fixed across all fusion strategies.}
+\label{tab:hyperparams}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Image backbone & MobileNetV3 \\
+Text model & TinyBERT (4L, 312D) \\
+Embedding dim & 256 \\
+Image size & $224 \times 224$ \\
+Batch size & 32 \\
+Optimiser & AdamW ($\lambda = 10^{-4}$) \\
+Stage 1 LR & $3 \times 10^{-4}$ \\
+Stage 2 LR (encoders) & $1 \times 10^{-5}$ \\
+Stage 2 LR (fusion/cls) & $1 \times 10^{-4}$ \\
+Schedule & Warmup (5 ep) + cosine \\
+Stage 1 / 2 epochs & 20 / 50 \\
+Label smoothing & 0.1 \\
+Cross-attn heads & 4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Results Overview}
+
+Table~\ref{tab:params} summarises the parameter counts for all models.
+
+\begin{table}[t]
+\centering
+\caption{Parameter counts. Neural fusion models include TinyBERT (${\sim}$12M frozen params). Score fusion adds only 1 parameter ($\alpha$) over the image-only baseline.}
+\label{tab:params}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Model} & \textbf{Total} & \textbf{Trainable} \\
+\midrule
+Image-only      & 2,015,601  & 2,015,601 \\
+Concat          & 16,578,329 & 4,610,105 \\
+Gated           & 16,709,913 & 4,741,689 \\
+Cross-attn      & 17,236,249 & 5,268,025 \\
+Score fusion    & 2,015,602  & 2,015,602 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:main_results} summarises the performance of all five models on the held-out test set.
+
+\begin{table}[t]
+\centering
+\caption{Test set performance across all models. Best result in each column is \textbf{bolded}.}
+\label{tab:main_results}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Model} & \textbf{Top-1} & \textbf{Top-5} & \textbf{Mac F1} & \textbf{Wt F1} \\
+\midrule
+Image-only      & 70.12 & 94.33 & 0.6982 & 0.6919 \\
+Concat          & 72.77 & 95.12 & 0.7252 & 0.7255 \\
+Gated           & 71.45 & 95.07 & 0.7198 & 0.7213 \\
+Cross-attn      & 73.54 & 94.68 & 0.7422 & 0.7341 \\
+Score fusion    & \textbf{75.61} & \textbf{96.01} & \textbf{0.7692} & \textbf{0.7585} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several patterns emerge. All multimodal methods outperform the image-only baseline, confirming that OCR text provides useful signal. The ranking is: score fusion (75.61\%) $>$ cross-attention (73.54\%) $>$ concatenation (72.77\%) $>$ gated (71.45\%) $>$ image-only (70.12\%). Most strikingly, the simplest text representation (fuzzy string matching) outperforms all three neural approaches, suggesting that on this small dataset, domain knowledge encoded as class-name aliases is more effective than learning text representations from limited, noisy data.
+
+Gated fusion underperforms concatenation despite its additional gating mechanism. Analysis of the learned gate values reveals the cause: the gate converges to a near-static ratio (mean $\approx 0.61$, favouring image) with negligible difference between text-present (0.614) and text-absent (0.608) samples, effectively reducing it to a fixed-weight concatenation. For score fusion, the learned scale $\alpha$ grows monotonically from 0 to 0.264 during training (Figure~\ref{fig:alpha_curve}), confirming that the model discovers the fuzzy text signal to be genuinely useful.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\columnwidth]{score_fusion_alpha.png}
+    \caption{Learned text scale $\alpha$ during score fusion training, growing from 0 (pure image classifier) to 0.264. The plateau after epoch 30 indicates convergence.}
+    \label{fig:alpha_curve}
+\end{figure}
+
+Figure~\ref{fig:training_curves} shows the validation accuracy curves. All models converge within 50 epochs, with score fusion achieving the highest accuracy early and maintaining its lead. The top-5 curves (right) are tightly grouped above 90\%.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{trainig_curve.png}
+    \caption{Validation accuracy during Stage~2 training. \textit{Left:} Top-1 accuracy. \textit{Right:} Top-5 accuracy. Score fusion achieves the highest accuracy and converges smoothly, while the neural fusion methods show more fluctuation due to their larger parameter counts.}
+    \label{fig:training_curves}
+\end{figure}
+
+\subsection{Modality Contribution Analysis}
+
+Since only 37\% of images have OCR text, we evaluate all models on the subset of test images with non-empty OCR output (Table~\ref{tab:text_subset}). This isolates the effect of text fusion on products where text is actually available.
+
+\begin{table}[t]
+\centering
+\caption{Performance on the text-available subset only (37\% of test images). $\Delta$ is the top-1 improvement over image-only on this subset.}
+\label{tab:text_subset}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Model} & \textbf{Top-1} & \textbf{Top-5} & \textbf{Wt F1} & \textbf{$\Delta$} \\
+\midrule
+Image-only      & 71.13 & 93.27 & 0.6920 & --- \\
+Concat          & 74.29 & 97.90 & 0.7513 & +3.16 \\
+Gated           & 74.41 & 96.91 & 0.7497 & +3.28 \\
+Cross-attn      & 77.12 & 98.02 & 0.7678 & +5.99 \\
+Score fusion    & \textbf{78.90} & 97.69 & \textbf{0.7890} & \textbf{+7.77} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Comparing Table~\ref{tab:text_subset} with the full-dataset results in Table~\ref{tab:main_results} reveals how much each fusion strategy benefits from available text. The image-only baseline performs similarly on both subsets (71.13\% vs 70.12\%), confirming that the text-available subset is not inherently easier to classify visually. However, all multimodal methods show larger gains on this subset. Cross-attention improves from +3.42 points over the baseline (full dataset) to +5.99 points (text-available subset)---nearly doubling its advantage. Score fusion shows the largest text-conditional gain at +7.77 points.
+
+This has an important implication: the overall results in Table~\ref{tab:main_results} \emph{underestimate} the value of text fusion, because 63\% of test images have no text and therefore cannot benefit from the text modality. Figure~\ref{fig:per_category} breaks this down by product category. On packaged goods (91\% OCR coverage), all fusion methods substantially outperform image-only, with score fusion achieving 88.3\% (+14.4 points). On fruit and vegetables (8--12\% OCR coverage), the gains are minimal ($<$1 point), confirming that text fusion only helps when text is available. The practical benefit of these models in a BVI assistive application would depend on the proportion of text-bearing products in the user's typical shopping basket.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{per_category_accuracy.png}
+    \caption{Per-category test accuracy by fusion architecture. Text fusion provides large gains on packaged goods (which have OCR text) but negligible gains on fruit and vegetables (which do not). This directly mirrors the OCR coverage pattern in Figure~\ref{fig:ocr_coverage}.}
+    \label{fig:per_category}
+\end{figure}
+
+To further quantify each modality's contribution, we evaluate the three neural fusion models with one modality zeroed out (Table~\ref{tab:modality}). In the ``Image-only'' condition, text embeddings are set to zero; in ``Text-only'', image embeddings are set to zero.
+
+\begin{table}[t]
+\centering
+\caption{Modality ablation (top-1 accuracy \%). Text $\Delta$ is the gain from adding text to the image-only condition.}
+\label{tab:modality}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Fusion} & \textbf{Full} & \textbf{Img-only} & \textbf{Txt-only} & \textbf{$\Delta$} \\
+\midrule
+Concat      & 72.77 & 68.52 & 31.24 & +4.25 \\
+Gated       & 71.45 & 69.11 & 28.19 & +2.34 \\
+Cross-attn  & 73.54 & 67.28 & 27.81 & +6.26 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three findings stand out. First, all fusion methods genuinely use both modalities: the full model consistently outperforms the image-only condition, confirming that none of the architectures have learned to ignore text. Second, cross-attention shows the largest text contribution (+6.26 points) and also the highest text-only accuracy (27.81\%), indicating that its bidirectional attention mechanism produces the richest text representations. However, this reliance on cross-modal interaction comes at a cost: when text is zeroed out, cross-attention drops to the lowest image-only accuracy (67.28\%), below both concatenation (68.52\%) and gated (69.11\%). Third, gated fusion shows the smallest text contribution (+2.34 points) and the highest image-only accuracy (69.11\%), confirming that the gate has learned to rely primarily on image features---making it the most robust to missing or unreliable text, but limiting its ability to exploit text when it is available.
+
+\subsection{Layer Freezing}
+
+Table~\ref{tab:freezing} shows the effect of unfreezing different numbers of TinyBERT transformer layers on weighted F1 across all three neural fusion strategies. TinyBERT has 4 transformer layers; ``0 unfrozen'' means all layers are frozen (text encoder used as a fixed feature extractor), while ``2 unfrozen'' means the top 2 layers are fine-tuned on the OCR data.
+
+\begin{table}[t]
+\centering
+\caption{Effect of text encoder layer unfreezing on weighted F1. TinyBERT has 4 layers; unfreezing allows adaptation to noisy OCR input. Image-only baseline (0.6919) is independent of text encoder configuration.}
+\label{tab:freezing}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Model} & \textbf{0 unfrozen} & \textbf{1 unfrozen} & \textbf{2 unfrozen} \\
+\midrule
+Image-only      & 0.6919 & 0.6919 & 0.6919 \\
+Concat          & 0.7255 & 0.7321 & \textbf{0.7367} \\
+Gated           & 0.7213 & 0.7349 & \textbf{0.7416} \\
+Cross-attn      & \textbf{0.7341} & 0.7279 & 0.7158 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A clear and surprising pattern emerges: concatenation and gated fusion \emph{improve} as more text encoder layers are unfrozen, while cross-attention \emph{degrades}. For concatenation, unfreezing 2 layers improves weighted F1 from 0.7255 to 0.7367 (+1.1 points). Gated fusion shows an even larger gain, from 0.7213 to 0.7416 (+2.0 points)---making it competitive with cross-attention when given the freedom to adapt its text representations. Notably, gated fusion with 2 unfrozen layers (0.7416) surpasses cross-attention at any freezing configuration (best: 0.7341).
+
+Cross-attention tells the opposite story: unfreezing text layers causes weighted F1 to drop from 0.7341 to 0.7158 ($-$1.8 points). This is consistent with overfitting: cross-attention already has the most parameters due to its multi-head attention layers, and unfreezing the text encoder adds further trainable parameters that the small dataset cannot support. For cross-attention, the pretrained frozen text representations provide a more stable signal.
+
+This finding has practical implications: the optimal text encoder configuration depends on the fusion strategy. Simpler fusion methods (concatenation, gated) benefit from text encoder adaptation, while more complex methods (cross-attention) require the regularisation provided by frozen pretrained weights.
+
+\section{Qualitative Analysis}
+
+Figure~\ref{fig:qualitative} illustrates a case where OCR text corrects an image-only misclassification. The test image shows bags of Granny Smith apples on a shelf, with ``GRANNY SMITH APPLES'' clearly printed on the packaging. The image-only model predicts Anjou pear with 65.8\% confidence---a reasonable visual confusion, since both are green, round fruits. However, all four fusion models correctly identify the product by leveraging the OCR text. Score fusion achieves the highest confidence (92.8\%), demonstrating the core value of multimodal fusion: packaging text provides a discriminative signal that the image alone cannot.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\columnwidth, trim=0 250 0 250, clip]{granny_smith_apples.png}
+
+    \vspace{0.5em}
+    \small
+    \begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Model} & \textbf{Top-1 Prediction} & \textbf{Confidence} \\
+    \midrule
+    Image-only      & Anjou (pear)          & 65.8\% \\
+    Concat          & Granny-Smith          & 87.4\% \\
+    Gated           & Granny-Smith          & 85.8\% \\
+    Cross-attn      & Granny-Smith          & 84.6\% \\
+    Score fusion    & Granny-Smith          & 92.8\% \\
+    \bottomrule
+    \end{tabular}
+
+    \caption{Qualitative example. \textit{Top:} bags of Granny Smith apples with clear text on packaging. \textit{Bottom:} model predictions. OCR extracted ``GRANNY SMITH APPLES''. The image-only baseline misclassifies this as Anjou (a green pear), while all four fusion models correctly identify Granny Smith.}
+    \label{fig:qualitative}
+\end{figure}
+
+% ============================================================================
+\section{Related Work}
+\label{sec:related_work}
+% ============================================================================
+
+\citet{klasson2019hierarchical} introduced the GroceryStoreDataset and benchmarked CNN classifiers; \citet{klasson2020using} later improved accuracy by combining images with web-scraped text descriptions, though this assumes pre-collected descriptions. \citet{georgiadis2021products6k} benchmarked OCR-based re-ranking on Products-6K, and \citet{george2015fine} pioneered OCR for grocery recognition using word frequency histograms.
+
+Most relevant to our work, \citet{pettersson2024multimodal} compared concatenation and gated fusion across multiple image and text models on their FineGrainOCR dataset, finding that multimodal approaches outperform unimodal baselines. We follow a similar methodology but differ in four respects: (1) we use the publicly available GroceryStoreDataset; (2) we include cross-attention fusion, which they did not evaluate; (3) we include a non-parametric score fusion baseline; and (4) we investigate layer freezing as regularisation. A persistent challenge across all OCR-based methods is text quality on grocery products (curved surfaces, small fonts, multilingual text) and the absence of packaging text on fruits and vegetables.
+
+% ============================================================================
+\section{Discussion \& Conclusions}
+\label{sec:conclusion}
+% ============================================================================
+
+\subsection{Summary}
+
+We compared four multimodal fusion strategies for fine-grained grocery product identification. Score fusion achieves the best accuracy (75.61\%), outperforming the image-only baseline by +5.5 points and cross-attention (the best neural method) by +2.1 points. Score fusion's success stems from three factors: (1) fuzzy matching exploits prior knowledge of class names rather than learning from limited, noisy OCR data; (2) curated Swedish aliases encode domain knowledge; and (3) its single-parameter architecture is highly resistant to overfitting. The layer freezing analysis reveals fusion-dependent optimal configurations: simpler methods benefit from unfreezing text layers, while cross-attention degrades due to overfitting.
+
+\subsection{When Does Text Help?}
+
+Text fusion primarily helps packaged products (Figure~\ref{fig:per_category}): on the 37\% of images with OCR text, score fusion improves by +7.77 points over image-only, versus +5.49 on the full dataset. Cross-attention benefits most from text (+6.26 points, Table~\ref{tab:modality}) but is most damaged when text is removed. Gated fusion benefits least (+2.34 points) but is most robust to missing text. The 63\% of images without text (fruits and vegetables) dilute the overall multimodal advantage.
+
+\subsection{Limitations and Future Work}
+
+Our evaluation is limited to a single dataset (${\sim}5,400$ images, 81 classes), a single OCR engine, and a single random seed. The fuzzy scorer requires manually curated class-name aliases, limiting scalability. Compared to \citet{pettersson2024multimodal}, whose larger dataset favours neural fusion, our results suggest the optimal strategy is dataset-size-dependent. Future work should evaluate on larger datasets, investigate end-to-end OCR training, and conduct user studies with BVI participants.
+
+
+% ============================================================================
+\begin{thebibliography}{20}
+\providecommand{\natexlab}[1]{#1}
+
+\bibitem[Brady et~al.(2013)]{brady2013visual}
+Brady, E., Morris, M.~R., Zhong, Y., White, S., \& Bigham, J.~P. (2013).
+\newblock Visual challenges in the everyday lives of blind people.
+\newblock \emph{Proceedings of CHI} (pp.\ 2117--2126). ACM.
+
+\bibitem[Devlin et~al.(2019)]{devlin2019bert}
+Devlin, J., Chang, M., Lee, K., \& Toutanova, K. (2019).
+\newblock BERT: Pre-training of deep bidirectional transformers for language understanding.
+\newblock \emph{NAACL-HLT 2019} (pp.\ 4171--4186).
+
+\bibitem[Garg et~al.(2025)]{garg2025trained}
+Garg, K., Tang, X., Heo, J., et~al. (2025).
+\newblock ``It's trained by non-disabled people'': Evaluating how image quality affects product captioning with VLMs.
+\newblock \emph{arXiv:2511.08917}.
+
+\bibitem[George et~al.(2015)]{george2015fine}
+George, M., Mircic, D., S\"{o}r\"{o}s, G., Floerkemeier, C., \& Mattern, F. (2015).
+\newblock Fine-grained product class recognition for assisted shopping.
+\newblock \emph{ICCV Workshops} (pp.\ 154--161).
+
+\bibitem[Georgiadis et~al.(2021)]{georgiadis2021products6k}
+Georgiadis, K., Kordopatis-Zilos, G., et~al. (2021).
+\newblock Products-6K: A large-scale groceries product recognition dataset.
+\newblock \emph{PETRA '21}. ACM.
+
+\bibitem[Jiao et~al.(2020)]{jiao2020tinybert}
+Jiao, X., et~al. (2020).
+\newblock TinyBERT: Distilling BERT for natural language understanding.
+\newblock \emph{Findings of EMNLP 2020} (pp.\ 4163--4174).
+
+\bibitem[Howard et~al.(2019)]{howard2019mobilenet}
+Howard, A., et~al. (2019).
+\newblock Searching for MobileNetV3.
+\newblock \emph{ICCV 2019} (pp.\ 1314--1324).
+
+\bibitem[Klasson et~al.(2019)]{klasson2019hierarchical}
+Klasson, M., Zhang, C., \& Kjellstr\"{o}m, H. (2019).
+\newblock A hierarchical grocery store image dataset with visual and semantic labels.
+\newblock \emph{IEEE WACV} (pp.\ 1--9).
+
+\bibitem[Klasson et~al.(2020)]{klasson2020using}
+Klasson, M., Zhang, C., \& Kjellstr\"{o}m, H. (2020).
+\newblock Using variational multi-view learning for classification of grocery items.
+\newblock \emph{Patterns}, 1(8), 100143.
+
+\bibitem[Krizhevsky et~al.(2012)]{krizhevsky2012imagenet}
+Krizhevsky, A., Sutskever, I., \& Hinton, G.~E. (2012).
+\newblock ImageNet classification with deep convolutional neural networks.
+\newblock \emph{NeurIPS 2012} (pp.\ 1097--1105).
+
+\bibitem[Mathis \& Sch\"{o}ning(2025)]{mathis2025lifeinsight}
+Mathis, F. \& Sch\"{o}ning, J. (2025).
+\newblock Lifeinsight: Design and evaluation of an AI-powered assistive wearable.
+\newblock \emph{Proceedings of CHI 2025}. ACM.
+
+\bibitem[Pettersson et~al.(2024)]{pettersson2024multimodal}
+Pettersson, T., Riveiro, M., \& L\"{o}fstr\"{o}m, T. (2024).
+\newblock Multimodal fine-grained grocery product recognition using image and OCR text.
+\newblock \emph{Machine Vision and Applications}, 35, 79.
+
+\bibitem[Selvam et~al.(2024)]{selvam2024bnfrnn}
+Selvam, P., Faheem, M., et~al. (2024).
+\newblock Batch normalization free rigorous feature flow neural network for grocery product recognition.
+\newblock \emph{IEEE Access}, 12, 68364--68377.
+
+\bibitem[Tan \& Le(2019)]{tan2019efficientnet}
+Tan, M. \& Le, Q. (2019).
+\newblock EfficientNet: Rethinking model scaling for convolutional neural networks.
+\newblock \emph{ICML 2019} (pp.\ 6105--6114).
+
+\bibitem[Vaswani et~al.(2017)]{vaswani2017attention}
+Vaswani, A., et~al. (2017).
+\newblock Attention is all you need.
+\newblock \emph{NeurIPS 2017} (pp.\ 5998--6008).
+
+\bibitem[Zhang et~al.(2018)]{zhang2018mixup}
+Zhang, H., Cisse, M., Dauphin, Y.~N., \& Lopez-Paz, D. (2018).
+\newblock mixup: Beyond empirical risk minimization.
+\newblock \emph{ICLR 2018}.
+
+\end{thebibliography}
+
+% ============================================================================
+\appendix
+\section{Architecture Diagrams}
+\label{sec:appendix}
+
+Figures~\ref{fig:concat}--\ref{fig:scorefusion} provide detailed architecture diagrams for the four fusion strategies evaluated in this work. All three neural fusion methods (Figures~\ref{fig:concat}--\ref{fig:crossattn}) share the same MobileNetV3 image encoder and TinyBERT text encoder; only the fusion module differs. Score fusion (Figure~\ref{fig:scorefusion}) replaces the neural text encoder with a fuzzy string matcher.
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{concat.jpg}
+    \caption{Concatenation fusion. Image and text embeddings (each $\mathbb{R}^{256}$) are concatenated to form a 512-dimensional vector, then projected to 256 dimensions by an MLP block for classification.}
+    \label{fig:concat}
+\end{figure*}
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=\textwidth]{gated.jpg}
+    \caption{Gated fusion. Both modalities are projected to a common space, then a sigmoid gate $\mathbf{g}$ computed from their concatenation dynamically weights the contribution of each modality to the fused representation.}
+    \label{fig:gated}
+\end{figure*}
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=\textwidth]{cross_attention.jpg}
+    \caption{Cross-attention fusion. Image spatial features and text token sequences attend to each other via multi-head attention, are mean-pooled, and concatenated before the classification MLP.}
+    \label{fig:crossattn}
+\end{figure*}
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=\textwidth]{OCR_score_macthing.jpg}
+    \caption{Score fusion. The image path produces class scores via a CNN and softmax, while the text path uses fuzzy string matching against known class names. The two score vectors are combined via a learned weighted fusion ($\alpha$).}
+    \label{fig:scorefusion}
+\end{figure*}
+
+\end{document}

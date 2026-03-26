@@ -3,15 +3,14 @@ Dataset loader for GroceryStoreDataset with multimodal support (image + OCR text
 """
 
 import json
-import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
 from PIL import Image
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from transformers import DistilBertTokenizer
+from transformers import AutoTokenizer
 
 from config import Config
 
@@ -52,7 +51,7 @@ class GroceryMultimodalDataset(Dataset):
         self.config = config
         self.transform = transform
 
-        self.tokenizer = DistilBertTokenizer.from_pretrained(config.text_model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.text_model_name)
 
         # Parse split file: each line is "rel_path, fine_label, coarse_label"
         split_file = self.data_root /f"{split}.txt"
@@ -147,12 +146,15 @@ class Cutout:
 
 def get_train_transforms(config: Config) -> transforms.Compose:
     t = [
-        transforms.Resize((config.image_size + 32, config.image_size + 32)),
-        transforms.RandomCrop(config.image_size),
+        # RandomResizedCrop gives scale + crop variation in one step (better than Resize+RandomCrop)
+        transforms.RandomResizedCrop(config.image_size, scale=(0.7, 1.0), ratio=(0.85, 1.15)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(15),
+        transforms.RandomPerspective(distortion_scale=0.2, p=0.3),
         transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.1),
+        transforms.RandomGrayscale(p=0.1),
         transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ]
@@ -177,13 +179,10 @@ def get_val_transforms(config: Config) -> transforms.Compose:
 def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Create train, val, and test dataloaders.
 
-    Merges the original train split + half of the test split for training
-    (2640 + ~1242 = ~3882 samples). The other half of the test split is
-    kept as a held-out test set for final evaluation.
-    The val split (296 samples) is used for validation during training.
-
-    The test split is shuffled with a fixed seed so the same half is always
-    used for training vs testing.
+    Uses the original dataset splits as-is:
+      - train.txt → training (2640 samples)
+      - val.txt   → validation (296 samples)
+      - test.txt  → held-out test (2485 samples)
     """
     with open(config.ocr_cache_path, "r") as f:
         ocr_cache = json.load(f)
@@ -196,35 +195,6 @@ def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoad
         config=config,
         transform=get_train_transforms(config),
     )
-    test_full = GroceryMultimodalDataset(
-        data_root=config.data_root,
-        split="test",
-        ocr_cache=ocr_cache,
-        config=config,
-        transform=get_train_transforms(config),
-    )
-
-    # Split test set in half with a fixed seed for reproducibility
-    n = len(test_full)
-    indices = list(range(n))
-    random.Random(config.seed).shuffle(indices)
-    half = n // 2
-    test_train_indices = indices[:half]
-    test_eval_indices = indices[half:]
-
-    test_train_subset = Subset(test_full, test_train_indices)
-
-    # For the eval half, we need val transforms (no augmentation)
-    test_eval_dataset = GroceryMultimodalDataset(
-        data_root=config.data_root,
-        split="test",
-        ocr_cache=ocr_cache,
-        config=config,
-        transform=get_val_transforms(config),
-    )
-    test_eval_subset = Subset(test_eval_dataset, test_eval_indices)
-
-    combined_train_dataset = ConcatDataset([train_dataset, test_train_subset])
 
     val_dataset = GroceryMultimodalDataset(
         data_root=config.data_root,
@@ -234,13 +204,21 @@ def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoad
         transform=get_val_transforms(config),
     )
 
-    # num_classes is derived from training data
-    config.num_classes = max(train_dataset.num_classes, test_full.num_classes)
-    print(f"[Combined train] {len(combined_train_dataset)} samples (train + half test)")
-    print(f"[Held-out test]  {len(test_eval_subset)} samples")
+    test_dataset = GroceryMultimodalDataset(
+        data_root=config.data_root,
+        split="test",
+        ocr_cache=ocr_cache,
+        config=config,
+        transform=get_val_transforms(config),
+    )
+
+    config.num_classes = max(train_dataset.num_classes, test_dataset.num_classes)
+    print(f"[Train] {len(train_dataset)} samples")
+    print(f"[Val]   {len(val_dataset)} samples")
+    print(f"[Test]  {len(test_dataset)} samples")
 
     train_loader = DataLoader(
-        combined_train_dataset,
+        train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
@@ -255,7 +233,7 @@ def create_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoad
         pin_memory=True,
     )
     test_loader = DataLoader(
-        test_eval_subset,
+        test_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
@@ -270,7 +248,7 @@ def create_text_only_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader
 
     Used for Stage 1 text encoder pretraining so the encoder learns from
     real text rather than training on [UNK] placeholders.
-    Uses the same train + half-test split as create_dataloaders.
+    Uses only the train split for training.
     """
     with open(config.ocr_cache_path, "r") as f:
         ocr_cache = json.load(f)
@@ -284,22 +262,6 @@ def create_text_only_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader
         ocr_only=True,
     )
 
-    # Load full test set (ocr_only) then take the same training half
-    test_full = GroceryMultimodalDataset(
-        data_root=config.data_root,
-        split="test",
-        ocr_cache=ocr_cache,
-        config=config,
-        transform=get_train_transforms(config),
-        ocr_only=True,
-    )
-    n = len(test_full)
-    indices = list(range(n))
-    random.Random(config.seed).shuffle(indices)
-    test_train_subset = Subset(test_full, indices[:n // 2])
-
-    combined_train = ConcatDataset([train_dataset, test_train_subset])
-
     val_dataset = GroceryMultimodalDataset(
         data_root=config.data_root,
         split="val",
@@ -309,10 +271,10 @@ def create_text_only_dataloaders(config: Config) -> Tuple[DataLoader, DataLoader
         ocr_only=True,
     )
 
-    print(f"[Text-only combined train] {len(combined_train)} samples")
+    print(f"[Text-only train] {len(train_dataset)} samples")
 
     train_loader = DataLoader(
-        combined_train,
+        train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,

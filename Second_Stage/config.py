@@ -17,33 +17,33 @@ class Config:
 
     # ── Dataset ──────────────────────────────────────────────────────────
     num_classes: int = 81            # GroceryStoreDataset has 81 fine-grained classes
-    image_size: int = 224
+    image_size: int = 224 
     max_text_length: int = 128       # Max OCR token length
 
     # ── Image Encoder ────────────────────────────────────────────────────
-    image_backbone: str = "efficientnet_b0"   # Options: efficientnet_b4, convnext_small, vit_small_patch16_224
+    image_backbone: str = "mobilenetv3_small_100"   # Options: mobilenetv3_large_100, efficientnet_b0, efficientnet_b4, convnext_small, vit_small_patch16_224
     image_embed_dim: int = 256
     image_pretrained: bool = True
-    image_dropout: float = 0.3
+    image_dropout: float = 0.4
 
     # ── Text Encoder ─────────────────────────────────────────────────────
-    text_model_name: str = "huawei-noah/TinyBERT_General_4L_312D"
+    text_model_name: str = "distilbert-base-multilingual-cased"
     text_embed_dim: int = 256
-    text_dropout: float = 0.2
-    freeze_text_layers: int = 4      # Freeze first N transformer layers
+    text_dropout: float = 0.3
+    freeze_text_layers: int = 1      # Freeze first N transformer layers
 
     # ── Fusion ───────────────────────────────────────────────────────────
     fusion_strategy: str = "gated"   # Options: concat, gated, cross_attention
     fused_dim: int = 256
-    fusion_dropout: float = 0.3
+    fusion_dropout: float = 0.4
     cross_attention_heads: int = 4   # Only used if fusion_strategy == "cross_attention"
 
     # ── Classifier Head ──────────────────────────────────────────────────
     classifier_hidden_dim: int = 256
-    classifier_dropout: float = 0.4
+    classifier_dropout: float = 0.5
 
     # ── Training ─────────────────────────────────────────────────────────
-    batch_size: int = 16
+    batch_size: int = 32
     num_workers: int = 4
     epochs: int = 50
     learning_rate: float = 1e-4

@@ -171,21 +171,16 @@ def train_image_encoder_stage1(
             # PyTorch accumulates gradients by default, so you must wipe them clean at the start of each batch
             optimizer.zero_grad()
             with autocast("cuda", enabled=config.fp16):
-                """
-                logits = model(images) — runs the forward pass through the entire model. 
-                The output logits is a tensor of shape [batch_size, num_classes]
-                — raw scores for each class (e.g., 200 numbers per image, one per grocery product).
-                """
-                logits = model(images)
-                loss = criterion(logits, labels)
+                output = model(images)
+                if isinstance(output, tuple):
+                    # Training mode: primary logits + auxiliary spatial logits
+                    logits, aux_logits = output
+                    loss = criterion(logits, labels) + 0.5 * criterion(aux_logits, labels)
+                else:
+                    logits = output
+                    loss = criterion(logits, labels)
 
             scaler.scale(loss).backward()
-            # after .backward(), every weight in the model now has a .grad attribute filled in.
-            """
-            Yes, exactly. Each weight is a Tensor object, and it has (among other things) two relevant fields:
-            weight.data   — the actual value (e.g. 0.342)
-            weight.grad   — the gradient, filled in after .backward()
-            """
             scaler.step(optimizer)
             scaler.update()
 
@@ -355,8 +350,10 @@ def train_multimodal(
     early_stopping = EarlyStopping(patience=config.early_stopping_patience)
 
     os.makedirs(config.checkpoint_dir, exist_ok=True)
+    os.makedirs(config.log_dir, exist_ok=True)
     best_acc = 0.0
     best_top5_acc = 0.0
+    history = []
 
     for epoch in range(config.epochs):
         start_time = time.time()
@@ -374,8 +371,12 @@ def train_multimodal(
             optimizer.zero_grad()
 
             with autocast("cuda", enabled=config.fp16):
-                # Optional: Mixup on images only
-                if config.use_mixup and random.random() < 0.5:
+                # Optional: Mixup on images only (skip for cross-attention
+                # since mixed images don't correspond to the original text tokens)
+                use_mixup = (config.use_mixup
+                             and config.fusion_strategy != "cross_attention"
+                             and random.random() < 0.5)
+                if use_mixup:
                     images, labels_a, labels_b, lam = mixup_data(
                         images, labels, config.mixup_alpha
                     )
@@ -419,11 +420,21 @@ def train_multimodal(
             f"Val Top-5: {val_top5_acc:.2f}%"
         )
 
+        history.append({
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+            "val_top5_acc": val_top5_acc,
+            "lr": lr,
+        })
+
         # ── Checkpointing ────────────────────────────────────────────
         if val_acc > best_acc:
             best_acc = val_acc
             best_top5_acc = val_top5_acc
-            ckpt_path = os.path.join(config.checkpoint_dir, "best_model.pth")
+            ckpt_path = os.path.join(config.checkpoint_dir, f"best_model_{config.fusion_strategy}_freeze{config.freeze_text_layers}.pth")
             torch.save(
                 {
                     "epoch": epoch + 1,
@@ -445,6 +456,15 @@ def train_multimodal(
     print(f"\n{'='*60}")
     print(f"Training complete! Best Val Acc: {best_acc:.2f}% | Top-5: {best_top5_acc:.2f}%")
     print(f"{'='*60}")
+
+    # Save training history
+    history_path = os.path.join(
+        config.log_dir,
+        f"history_{config.fusion_strategy}_freeze{config.freeze_text_layers}.json",
+    )
+    with open(history_path, "w") as f:
+        json.dump(history, f, indent=2)
+    print(f"  Saved training history -> {history_path}")
 
     return model
 
@@ -499,6 +519,11 @@ def main():
                         help="Path to saved Stage 1 image encoder weights — skips Stage 1a")
     parser.add_argument("--load_text_encoder", type=str, default=None,
                         help="Path to saved Stage 1 text encoder weights — skips Stage 1b")
+    parser.add_argument("--freeze_text_layers", type=int, default=None,
+                        help="Number of text encoder transformer layers to freeze (default: from config)")
+    parser.add_argument("--text_model", type=str, default=None,
+                        help="Text encoder model name (default: from config). "
+                             "Use 'bert-base-multilingual-cased' for Swedish+English support.")
     parser.add_argument("--stage1_only", action="store_true",
                         help="Run Stage 1 encoder pretraining only, then exit. "
                              "Weights are saved to checkpoint_dir. "
@@ -522,6 +547,10 @@ def main():
         config.staged_training = False
     if args.device:
         config.device = args.device
+    if args.freeze_text_layers is not None:
+        config.freeze_text_layers = args.freeze_text_layers
+    if args.text_model:
+        config.text_model_name = args.text_model
 
     set_seed(config.seed)
 
@@ -553,9 +582,12 @@ def main():
                 pretrained=False,
                 dropout=config.image_dropout,
             ).to(config.device)
-            image_encoder.load_state_dict(
-                torch.load(args.load_image_encoder, map_location=config.device)
+            result = image_encoder.load_state_dict(
+                torch.load(args.load_image_encoder, map_location=config.device),
+                strict=False,
             )
+            if result.missing_keys:
+                print(f"  (Randomly initialized: {result.missing_keys})")
             print(f"Loaded image encoder from {args.load_image_encoder}")
         else:
             image_encoder = train_image_encoder_stage1(config, train_loader, val_loader)

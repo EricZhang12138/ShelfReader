@@ -1,0 +1,4 @@
+category,image_only_correct,image_only_total,image_only_acc,gated_correct,gated_total,gated_acc,delta
+Fruit,703,1117,62.94,814,1117,72.87,+9.94
+Packages,726,781,92.96,750,781,96.03,+3.07
+Vegetables,477,587,81.26,503,587,85.69,+4.43

@@ -83,8 +83,13 @@ class GatedFusion(nn.Module):
 
 class CrossAttentionFusion(nn.Module):
     """
-    Cross-attention fusion: image attends to text and vice versa,
-    then combines the attended representations.
+    Cross-attention fusion: image spatial tokens attend to text tokens and
+    vice versa, then the attended representations are pooled and combined.
+
+    Expects sequence-level (multi-token) inputs from both encoders so that
+    the attention mechanism is non-trivial:
+      - img_seq: [B, S_img, img_dim]  (e.g. spatial features before global pool)
+      - txt_seq: [B, S_txt, txt_dim]  (e.g. all token embeddings, not just CLS)
 
     This is the most expressive fusion but also the most compute-heavy.
     Works best when both modalities carry rich, complementary information.
@@ -100,7 +105,7 @@ class CrossAttentionFusion(nn.Module):
     ):
         super().__init__()
 
-        # Project to common dimension
+        # Project to common dimension (applied per-token)
         self.img_proj = nn.Linear(img_dim, fused_dim)
         self.txt_proj = nn.Linear(txt_dim, fused_dim)
 
@@ -120,7 +125,7 @@ class CrossAttentionFusion(nn.Module):
             batch_first=True,
         )
 
-        # Combine the two attended representations
+        # Combine the two pooled attended representations
         self.output = nn.Sequential(
             nn.Linear(fused_dim * 2, fused_dim),
             nn.ReLU(inplace=True),
@@ -128,24 +133,52 @@ class CrossAttentionFusion(nn.Module):
             nn.LayerNorm(fused_dim),
         )
 
-    def forward(self, x_img: torch.Tensor, x_txt: torch.Tensor) -> torch.Tensor:
-        # Project to common space
-        img = self.img_proj(x_img).unsqueeze(1)  # [B, 1, fused_dim]
-        txt = self.txt_proj(x_txt).unsqueeze(1)  # [B, 1, fused_dim]
+    def forward(
+        self,
+        img_seq: torch.Tensor,
+        txt_seq: torch.Tensor,
+        txt_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            img_seq:  [B, S_img, img_dim] — spatial image features
+            txt_seq:  [B, S_txt, txt_dim] — token-level text features
+            txt_mask: [B, S_txt] — attention mask (1 = real token, 0 = padding)
+        Returns:
+            x_fused:  [B, fused_dim]
+        """
+        # Project to common space (per-token)
+        img = self.img_proj(img_seq)  # [B, S_img, fused_dim]
+        txt = self.txt_proj(txt_seq)  # [B, S_txt, fused_dim]
 
-        # Cross-attention in both directions
+        # Build key_padding_mask for text (True = ignore position)
+        txt_key_padding_mask = None
+        if txt_mask is not None:
+            txt_key_padding_mask = (txt_mask == 0)  # [B, S_txt]
+
+        # Cross-attention: each image token attends to all text tokens
         img_attended, _ = self.img_to_txt_attn(
-            query=img, key=txt, value=txt
-        )  # [B, 1, fused_dim]
+            query=img, key=txt, value=txt,
+            key_padding_mask=txt_key_padding_mask,
+        )  # [B, S_img, fused_dim]
+
+        # Cross-attention: each text token attends to all image tokens
+        # (image has no padding, so no mask needed)
         txt_attended, _ = self.txt_to_img_attn(
-            query=txt, key=img, value=img
-        )  # [B, 1, fused_dim]
+            query=txt, key=img, value=img,
+        )  # [B, S_txt, fused_dim]
 
-        # Squeeze and combine
-        img_attended = img_attended.squeeze(1)  # [B, fused_dim]
-        txt_attended = txt_attended.squeeze(1)  # [B, fused_dim]
+        # Pool: mean over spatial/token dimension
+        img_pooled = img_attended.mean(dim=1)  # [B, fused_dim]
 
-        combined = torch.cat([img_attended, txt_attended], dim=-1)  # [B, fused_dim * 2]
+        # Masked mean pooling for text
+        if txt_mask is not None:
+            txt_mask_expanded = txt_mask.unsqueeze(-1).float()  # [B, S_txt, 1]
+            txt_pooled = (txt_attended * txt_mask_expanded).sum(dim=1) / txt_mask_expanded.sum(dim=1).clamp(min=1)
+        else:
+            txt_pooled = txt_attended.mean(dim=1)  # [B, fused_dim]
+
+        combined = torch.cat([img_pooled, txt_pooled], dim=-1)  # [B, fused_dim * 2]
         return self.output(combined)  # [B, fused_dim]
 
 

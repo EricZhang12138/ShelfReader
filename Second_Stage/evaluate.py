@@ -111,20 +111,38 @@ def analyze_modality_contributions(model, dataloader, config):
         logits_full = model(images, input_ids, attention_mask)
         results["full"] += (logits_full.argmax(1) == labels).sum().item()
 
-        # Image only: get embeddings, zero text
+        # Modality ablation
         emb = model.get_embeddings(images, input_ids, attention_mask)
-        x_img = emb["x_img"]
-        x_txt_zero = torch.zeros_like(emb["x_txt"])
-        x_fused = model.fusion(x_img, x_txt_zero)
-        logits_img = model.classifier(x_fused)
-        results["image_only"] += (logits_img.argmax(1) == labels).sum().item()
 
-        # Text only: zero image
-        x_img_zero = torch.zeros_like(emb["x_img"])
-        x_txt = emb["x_txt"]
-        x_fused = model.fusion(x_img_zero, x_txt)
-        logits_txt = model.classifier(x_fused)
-        results["text_only"] += (logits_txt.argmax(1) == labels).sum().item()
+        if model.use_cross_attention:
+            img_seq = emb["img_seq"]
+            txt_seq = emb["txt_seq"]
+            txt_mask = emb["txt_mask"]
+
+            # Image only: zero out text sequence
+            txt_zero = torch.zeros_like(txt_seq)
+            x_fused = model.fusion(img_seq, txt_zero, txt_mask)
+            logits_img = model.classifier(x_fused)
+            results["image_only"] += (logits_img.argmax(1) == labels).sum().item()
+
+            # Text only: zero out image sequence
+            img_zero = torch.zeros_like(img_seq)
+            x_fused = model.fusion(img_zero, txt_seq, txt_mask)
+            logits_txt = model.classifier(x_fused)
+            results["text_only"] += (logits_txt.argmax(1) == labels).sum().item()
+        else:
+            x_img = emb["x_img"]
+            x_txt = emb["x_txt"]
+
+            # Image only: zero out text embedding
+            x_fused = model.fusion(x_img, torch.zeros_like(x_txt))
+            logits_img = model.classifier(x_fused)
+            results["image_only"] += (logits_img.argmax(1) == labels).sum().item()
+
+            # Text only: zero out image embedding
+            x_fused = model.fusion(torch.zeros_like(x_img), x_txt)
+            logits_txt = model.classifier(x_fused)
+            results["text_only"] += (logits_txt.argmax(1) == labels).sum().item()
 
         results["total"] += labels.size(0)
 
@@ -152,7 +170,7 @@ def main():
 
     # Build model and load weights
     model = build_model(config).to(config.device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
     print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
 
     # Evaluate on the held-out test set (half of original test split)

@@ -1,2 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Model checkpoints (too large for GitHub)
+*.pth
+
+# OCR caches (generated, large)
+Second_Stage/ocr_cache*.json
+
+# Training logs & generated outputs
+Second_Stage/logs/
+Second_Stage/training_history.csv
+Second_Stage/gate_distribution.png
+
+# LibreOffice lock files
+.~lock.*
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+
+# PDFs (compiled/example reports - too large, not source)
+*.pdf
+
+# Archives & extracted repos
+*.zip
+papers/mlpractical/
+
+# IDE / tool settings
+.vscode/
+.claude/
+
+# Test images
+Second_Stage/test_image/
+
+# Original ignores
 pan_dataset/
-Second_Stage/checkpoints/best_model.pth
+YOLO_Train/
